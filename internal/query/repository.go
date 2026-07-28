@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -326,13 +327,41 @@ func (r *Repository) Filters(ctx context.Context) (Filters, error) {
 	plugins, err := distinctStrings(
 		ctx,
 		r.db,
-		`SELECT DISTINCT plugin_name FROM response_events
+		`SELECT plugin_name FROM response_events
+		  WHERE plugin_name IS NOT NULL AND plugin_name != ''
+		 UNION
+		 SELECT plugin_name FROM diagnostic_logs
 		  WHERE plugin_name IS NOT NULL AND plugin_name != ''
 		  ORDER BY plugin_name`,
 	)
 	if err != nil {
 		return Filters{}, fmt.Errorf("list plugins: %w", err)
 	}
+	loggerNames, err := distinctStrings(
+		ctx,
+		r.db,
+		`SELECT DISTINCT logger_name FROM diagnostic_logs
+		  WHERE (plugin_name IS NULL OR plugin_name = '')
+		    AND logger_name IS NOT NULL AND logger_name != ''
+		  ORDER BY logger_name`,
+	)
+	if err != nil {
+		return Filters{}, fmt.Errorf("list diagnostic origins: %w", err)
+	}
+	pluginSet := make(map[string]struct{}, len(plugins)+len(loggerNames))
+	for _, plugin := range plugins {
+		pluginSet[plugin] = struct{}{}
+	}
+	for _, loggerName := range loggerNames {
+		if plugin := diagnosticPluginFromLogger(loggerName); plugin != "" {
+			pluginSet[plugin] = struct{}{}
+		}
+	}
+	plugins = plugins[:0]
+	for plugin := range pluginSet {
+		plugins = append(plugins, plugin)
+	}
+	sort.Strings(plugins)
 	return Filters{Groups: groups, Plugins: plugins}, nil
 }
 
@@ -443,6 +472,17 @@ type DiagnosticPage struct {
 	NextCursor string              `json:"next_cursor,omitempty"`
 }
 
+func diagnosticPluginFromLogger(loggerName string) string {
+	parts := strings.Split(strings.TrimSpace(loggerName), ".")
+	if len(parts) == 0 {
+		return ""
+	}
+	if parts[0] == "plugins" && len(parts) > 1 {
+		return parts[1]
+	}
+	return parts[0]
+}
+
 func (r *Repository) ListDiagnostics(
 	ctx context.Context,
 	filters DiagnosticFilters,
@@ -467,8 +507,28 @@ func (r *Repository) ListDiagnostics(
 		args = append(args, filters.Level)
 	}
 	if filters.Plugin != "" {
-		conditions = append(conditions, "plugin_name = ?")
-		args = append(args, filters.Plugin)
+		conditions = append(
+			conditions,
+			`(plugin_name = ? OR (
+				(plugin_name IS NULL OR plugin_name = '') AND (
+					logger_name = ?
+					OR substr(logger_name, 1, length(?) + 1) = ? || '.'
+					OR logger_name = 'plugins.' || ?
+					OR substr(logger_name, 1, length(?) + 9) =
+						'plugins.' || ? || '.'
+				)
+			))`,
+		)
+		args = append(
+			args,
+			filters.Plugin,
+			filters.Plugin,
+			filters.Plugin,
+			filters.Plugin,
+			filters.Plugin,
+			filters.Plugin,
+			filters.Plugin,
+		)
 	}
 	if filters.FromMS != nil {
 		conditions = append(conditions, "created_at_ms >= ?")
@@ -531,6 +591,9 @@ func (r *Repository) ListDiagnostics(
 			&item.RunID,
 		); err != nil {
 			return DiagnosticPage{}, fmt.Errorf("scan diagnostic: %w", err)
+		}
+		if item.PluginName == "" {
+			item.PluginName = diagnosticPluginFromLogger(item.LoggerName)
 		}
 		item.TimeDisplay = timefmt.FormatMilliseconds(item.createdAtMS)
 		items = append(items, item)

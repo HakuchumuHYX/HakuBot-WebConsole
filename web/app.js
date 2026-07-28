@@ -100,6 +100,13 @@ function textCell(value, className = "") {
   return cell;
 }
 
+function pluginModuleLabel(pluginName, moduleName, loggerName = "") {
+  const plugin = String(pluginName || loggerName || "").trim();
+  const module = String(moduleName || "").trim();
+  if (plugin && module && plugin !== module) return `${plugin} / ${module}`;
+  return plugin || module || "系统";
+}
+
 function statusBadge(status) {
   const span = document.createElement("span");
   span.className = `badge ${status}`;
@@ -253,11 +260,19 @@ async function loadDiagnostics({ append = false } = {}) {
     row.append(
       textCell(item.time_display),
       level,
-      textCell(item.plugin_name || item.module_name || item.logger_name),
+      textCell(pluginModuleLabel(
+        item.plugin_name,
+        item.module_name,
+        item.logger_name,
+      )),
       textCell(item.message_summary, "summary"),
     );
     row.addEventListener("click", async () => {
-      $("#detail-title").textContent = `${item.level} · ${item.plugin_name || item.module_name || "系统"}`;
+      $("#detail-title").textContent = `${item.level} · ${pluginModuleLabel(
+        item.plugin_name,
+        item.module_name,
+        item.logger_name,
+      )}`;
       $("#detail-meta").replaceChildren();
       $("#raw-actions").replaceChildren();
       if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
