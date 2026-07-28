@@ -16,7 +16,9 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 function toast(message) {
   const element = $("#toast");
-  element.textContent = message;
+  if (!element) return;
+  const msgElement = $("#toast-message") || element;
+  msgElement.textContent = message;
   element.classList.remove("hidden");
   clearTimeout(element._timer);
   element._timer = setTimeout(() => element.classList.add("hidden"), 4500);
@@ -70,11 +72,11 @@ function shiftedHours(hours, now = new Date()) {
 
 function setQuickRange(value) {
   const form = $("#event-filters");
-  if (value === "custom") return;
+  if (!form || value === "custom") return;
   const now = new Date();
   const hours = { "1h": -1, "24h": -24, "7d": -168 }[value];
-  form.elements.from.value = shiftedHours(hours, now);
-  form.elements.to.value = partsToInput(gmt8Parts(now));
+  if (form.elements.from) form.elements.from.value = shiftedHours(hours, now);
+  if (form.elements.to) form.elements.to.value = partsToInput(gmt8Parts(now));
 }
 
 function filterParams(form, includeCursor = false) {
@@ -172,8 +174,10 @@ async function showEventDetail(id) {
   const actions = $("#raw-actions");
   actions.replaceChildren();
   $("#raw-content").textContent = detail.has_full_diagnostics
-    ? "选择输入、输出或日志查看完整内容。"
+    ? "选择上方内容查看完整原始数据。"
     : "该普通成功响应仅保存摘要，没有完整诊断数据。";
+  if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
+  
   if (detail.has_full_diagnostics) {
     for (const [part, label] of [["input", "完整输入"], ["output", "完整输出"], ["logs", "完整日志"]]) {
       const view = document.createElement("button");
@@ -191,9 +195,18 @@ async function showEventDetail(id) {
 
 async function loadRaw(path) {
   const target = $("#raw-content");
+  const copyBtn = $("#copy-raw-btn");
   target.textContent = "正在加载完整内容…";
+  if (copyBtn) copyBtn.classList.add("hidden");
   try {
-    target.textContent = await (await api(path)).text();
+    const text = await (await api(path)).text();
+    try {
+      const json = JSON.parse(text);
+      target.textContent = JSON.stringify(json, null, 2);
+    } catch (_) {
+      target.textContent = text;
+    }
+    if (copyBtn) copyBtn.classList.remove("hidden");
   } catch (error) {
     target.textContent = `加载失败：${error.message}`;
   }
@@ -203,10 +216,12 @@ async function loadFilters() {
   const data = await (await api("/api/filters")).json();
   for (const selector of ['#event-filters select[name="group_id"]']) {
     const select = $(selector);
+    if (!select) continue;
     for (const value of data.groups || []) select.add(new Option(value, value));
   }
   for (const selector of ['#event-filters select[name="plugin"]', '#diagnostic-filters select[name="plugin"]']) {
     const select = $(selector);
+    if (!select) continue;
     for (const value of data.plugins || []) select.add(new Option(value, value));
   }
 }
@@ -215,7 +230,8 @@ async function loadBotStatus() {
   const data = await (await api("/api/bot-status")).json();
   const element = $("#bot-status");
   element.className = `status ${data.online ? "online" : "offline"}`;
-  element.lastElementChild.textContent = data.online ? "在线" : "离线";
+  const textSpan = element.querySelector(".status-text") || element.lastElementChild;
+  textSpan.textContent = data.online ? "在线" : "离线";
 }
 
 async function loadDiagnostics({ append = false } = {}) {
@@ -244,6 +260,7 @@ async function loadDiagnostics({ append = false } = {}) {
       $("#detail-title").textContent = `${item.level} · ${item.plugin_name || item.module_name || "系统"}`;
       $("#detail-meta").replaceChildren();
       $("#raw-actions").replaceChildren();
+      if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
       $("#detail-dialog").showModal();
       await loadRaw(`/api/diagnostics/${item.id}`);
     });
@@ -294,7 +311,9 @@ function updateCleanupCutoff() {
   if (value !== "custom") $("#cleanup-cutoff").value = calendarMonthsAgo(Number(value));
   state.confirmationToken = "";
   $("#execute-cleanup").disabled = true;
-  $("#cleanup-preview").textContent = "截止时间已变化，请重新预览。";
+  const preview = $("#cleanup-preview");
+  const span = preview.querySelector("span") || preview;
+  span.textContent = "截止时间已变化，请重新预览。";
 }
 
 async function mutation(path, body) {
@@ -315,7 +334,9 @@ async function previewCleanup() {
   const data = await (await mutation("/api/storage/cleanup/preview", { cutoff })).json();
   state.confirmationToken = data.confirmation_token;
   state.previewCutoff = cutoff;
-  $("#cleanup-preview").textContent = `将删除 ${data.preview.response_count} 条响应和 ${data.preview.diagnostic_count} 条诊断；截止点：${data.preview.cutoff_display} GMT+8。`;
+  const preview = $("#cleanup-preview");
+  const span = preview.querySelector("span") || preview;
+  span.textContent = `将删除 ${data.preview.response_count} 条响应和 ${data.preview.diagnostic_count} 条诊断；截止点：${data.preview.cutoff_display} GMT+8。`;
   const execute = $("#execute-cleanup");
   execute.textContent = `清理 ${data.preview.cutoff_display} GMT+8 之前的日志`;
   execute.disabled = false;
@@ -332,7 +353,9 @@ async function executeCleanup() {
     confirmation_token: state.confirmationToken,
   })).json();
   state.confirmationToken = "";
-  $("#cleanup-preview").textContent = `完成：删除 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断。`;
+  const preview = $("#cleanup-preview");
+  const span = preview.querySelector("span") || preview;
+  span.textContent = `完成：删除 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断。`;
   toast("日志清理和增量空间回收已完成");
   await Promise.all([loadStorage(), loadEvents(), loadDiagnostics()]);
 }
@@ -411,6 +434,22 @@ function bindEvents() {
       await loadStorage();
     } catch (error) { toast(error.message); }
   });
+  if ($("#copy-raw-btn")) {
+    $("#copy-raw-btn").addEventListener("click", () => {
+      const text = $("#raw-content").textContent;
+      if (text) {
+        navigator.clipboard.writeText(text).then(() => toast("已复制到剪贴板")).catch(() => toast("复制失败"));
+      }
+    });
+  }
+  if ($("#toggle-event-filters")) {
+    $("#toggle-event-filters").addEventListener("click", () => {
+      const grid = $("#event-filters .filter-grid");
+      const isHidden = getComputedStyle(grid).display === "none";
+      grid.style.display = isHidden ? "grid" : "none";
+      $("#toggle-event-filters").textContent = isHidden ? "收起筛选" : "展开筛选";
+    });
+  }
 }
 
 async function initialize() {

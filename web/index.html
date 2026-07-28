@@ -5,170 +5,354 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>HakuBot WebConsole</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <!-- Ambient background glow elements -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
   <header class="topbar">
-    <div>
-      <p class="eyebrow">HAKUBOT / NONEBOT</p>
-      <h1>事件响应控制台</h1>
+    <div class="brand">
+      <div class="brand-logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+          <line x1="8" y1="21" x2="16" y2="21"></line>
+          <line x1="12" y1="17" x2="12" y2="21"></line>
+          <polyline points="7 8 10 11 7 14"></polyline>
+          <line x1="13" y1="14" x2="17" y2="14"></line>
+        </svg>
+      </div>
+      <div>
+        <p class="eyebrow">HAKUBOT / NONEBOT</p>
+        <h1>事件响应控制台</h1>
+      </div>
     </div>
     <div class="status-area">
       <span id="bot-status" class="status offline">
         <span class="status-dot"></span>
-        <span>离线</span>
+        <span class="status-text">离线</span>
       </span>
-      <span id="current-time" class="muted">当前时间 · GMT+8</span>
+      <span id="current-time" class="muted font-mono">当前时间 · GMT+8</span>
     </div>
   </header>
 
-  <nav class="tabs" aria-label="控制台视图">
-    <button class="tab active" data-view="events">事件响应</button>
-    <button class="tab" data-view="diagnostics">系统警告 / 错误</button>
-    <button class="tab" data-view="storage">存储管理</button>
+  <nav class="tabs-container">
+    <div class="tabs" aria-label="控制台视图">
+      <button class="tab active" data-view="events">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+        </svg>
+        <span>事件响应</span>
+      </button>
+      <button class="tab" data-view="diagnostics">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+          <line x1="12" y1="9" x2="12" y2="13"></line>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <span>系统警告 / 错误</span>
+      </button>
+      <button class="tab" data-view="storage">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M21 19c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14"></path>
+          <path d="M21 5v14"></path>
+        </svg>
+        <span>存储管理</span>
+      </button>
+    </div>
   </nav>
 
   <main>
     <section id="view-events" class="view active">
       <form id="event-filters" class="panel filters">
-        <label>状态
-          <select name="status">
-            <option value="">全部</option>
-            <option value="success">成功</option>
-            <option value="failure">失败</option>
-          </select>
-        </label>
-        <label>快捷时间
-          <select name="quick_time">
-            <option value="1h">最近 1 小时</option>
-            <option value="24h" selected>最近 24 小时</option>
-            <option value="7d">最近 7 天</option>
-            <option value="custom">自定义</option>
-          </select>
-        </label>
-        <label>开始时间（GMT+8）
-          <input name="from" type="datetime-local" step="1">
-        </label>
-        <label>结束时间（GMT+8）
-          <input name="to" type="datetime-local" step="1">
-        </label>
-        <label>群号
-          <select name="group_id"><option value="">全部群</option></select>
-        </label>
-        <label>插件
-          <select name="plugin"><option value="">全部插件</option></select>
-        </label>
+        <div class="filter-header-mobile">
+          <span class="filter-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+            筛选条件
+          </span>
+          <button type="button" class="filter-toggle-btn" id="toggle-event-filters">收起筛选</button>
+        </div>
+        <div class="filter-grid">
+          <label>状态
+            <select name="status">
+              <option value="">全部</option>
+              <option value="success">成功</option>
+              <option value="failure">失败</option>
+            </select>
+          </label>
+          <label>快捷时间
+            <select name="quick_time">
+              <option value="1h">最近 1 小时</option>
+              <option value="24h" selected>最近 24 小时</option>
+              <option value="7d">最近 7 天</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <label>开始时间（GMT+8）
+            <input name="from" type="datetime-local" step="1">
+          </label>
+          <label>结束时间（GMT+8）
+            <input name="to" type="datetime-local" step="1">
+          </label>
+          <label>群号
+            <select name="group_id"><option value="">全部群</option></select>
+          </label>
+          <label>插件
+            <select name="plugin"><option value="">全部插件</option></select>
+          </label>
+        </div>
         <div class="filter-actions">
-          <button type="submit" class="primary">应用筛选</button>
-          <button type="button" id="clear-filters">清除</button>
-          <span class="muted refresh-note">每 3 秒自动刷新</span>
+          <button type="submit" class="primary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            应用筛选
+          </button>
+          <button type="button" id="clear-filters" class="secondary">清除</button>
+          <span class="muted refresh-note">
+            <span class="live-dot"></span>
+            每 3 秒自动刷新
+          </span>
         </div>
       </form>
 
       <div id="stats" class="stats" aria-live="polite">
-        <article><span>响应总数</span><strong id="stat-total">—</strong></article>
-        <article><span>成功</span><strong id="stat-success">—</strong></article>
-        <article><span>失败</span><strong id="stat-failure">—</strong></article>
-        <article><span>成功率</span><strong id="stat-rate">—</strong></article>
+        <article class="stat-card">
+          <div class="stat-icon stat-icon-blue">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+          </div>
+          <div class="stat-info">
+            <span>响应总数</span>
+            <strong id="stat-total" class="font-heading">—</strong>
+          </div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-icon stat-icon-green">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+          </div>
+          <div class="stat-info">
+            <span>成功数</span>
+            <strong id="stat-success" class="font-heading">—</strong>
+          </div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-icon stat-icon-red">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+          </div>
+          <div class="stat-info">
+            <span>失败数</span>
+            <strong id="stat-failure" class="font-heading">—</strong>
+          </div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-icon stat-icon-purple">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+          </div>
+          <div class="stat-info">
+            <span>成功率</span>
+            <strong id="stat-rate" class="font-heading">—</strong>
+          </div>
+        </article>
       </div>
 
       <div class="panel table-panel">
         <div class="table-title">
-          <h2>真实响应</h2>
-          <span class="muted">只记录发送或实际故障的 Matcher</span>
+          <div>
+            <h2>真实响应日志</h2>
+            <span class="muted">只记录发送或实际故障的 Matcher</span>
+          </div>
         </div>
         <div class="table-scroll">
-          <table>
+          <table class="responsive-table">
             <thead>
               <tr>
-                <th>时间（GMT+8）</th><th>状态</th><th>插件</th>
-                <th>群 / 用户</th><th>输入</th><th>输出</th><th>耗时</th>
+                <th>时间（GMT+8）</th>
+                <th>状态</th>
+                <th>插件</th>
+                <th>群 / 用户</th>
+                <th>输入</th>
+                <th>输出</th>
+                <th>耗时</th>
               </tr>
             </thead>
             <tbody id="event-rows"></tbody>
           </table>
         </div>
-        <div id="event-empty" class="empty hidden">当前筛选条件下没有响应记录。</div>
-        <button id="load-more" class="load-more hidden">加载更多</button>
+        <div id="event-empty" class="empty hidden">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><path d="M8 15s1.5-2 4-2 4 2 4 2"></path><line x1="9" y1="9" x2="9.01" y2="9"></line><line x1="15" y1="9" x2="15.01" y2="9"></line></svg>
+          <p>当前筛选条件下没有响应记录</p>
+        </div>
+        <button id="load-more" class="load-more hidden">加载更多记录</button>
       </div>
     </section>
 
     <section id="view-diagnostics" class="view">
       <form id="diagnostic-filters" class="panel filters compact">
-        <label>级别
-          <select name="level">
-            <option value="">全部</option>
-            <option value="WARNING">WARNING</option>
-            <option value="ERROR">ERROR</option>
-            <option value="CRITICAL">CRITICAL</option>
-          </select>
-        </label>
-        <label>插件
-          <select name="plugin"><option value="">全部插件</option></select>
-        </label>
-        <button type="submit" class="primary">应用筛选</button>
+        <div class="filter-grid">
+          <label>级别
+            <select name="level">
+              <option value="">全部级别</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR">ERROR</option>
+              <option value="CRITICAL">CRITICAL</option>
+            </select>
+          </label>
+          <label>插件
+            <select name="plugin"><option value="">全部插件</option></select>
+          </label>
+        </div>
+        <button type="submit" class="primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          应用筛选
+        </button>
       </form>
       <div class="panel table-panel">
-        <div class="table-title"><h2>完整系统诊断</h2></div>
+        <div class="table-title">
+          <div>
+            <h2>完整系统诊断</h2>
+            <span class="muted">查看系统警告、错误与关键 Traceback 日志</span>
+          </div>
+        </div>
         <div class="table-scroll">
-          <table>
+          <table class="responsive-table">
             <thead>
-              <tr><th>时间（GMT+8）</th><th>级别</th><th>插件 / 模块</th><th>内容</th></tr>
+              <tr>
+                <th>时间（GMT+8）</th>
+                <th>级别</th>
+                <th>插件 / 模块</th>
+                <th>日志内容</th>
+              </tr>
             </thead>
             <tbody id="diagnostic-rows"></tbody>
           </table>
         </div>
-        <div id="diagnostic-empty" class="empty hidden">没有系统警告或错误。</div>
-        <button id="diagnostic-more" class="load-more hidden">加载更多</button>
+        <div id="diagnostic-empty" class="empty hidden">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+          <p>太棒了！当前没有任何系统警告或错误记录。</p>
+        </div>
+        <button id="diagnostic-more" class="load-more hidden">加载更多记录</button>
       </div>
     </section>
 
     <section id="view-storage" class="view">
       <div class="storage-grid">
-        <article class="panel storage-card"><span>SQLite</span><strong id="size-db">—</strong></article>
-        <article class="panel storage-card"><span>WAL / SHM</span><strong id="size-wal">—</strong></article>
-        <article class="panel storage-card"><span>待导入 spool</span><strong id="size-spool">—</strong></article>
-        <article class="panel storage-card"><span>记录</span><strong id="record-count">—</strong></article>
+        <article class="panel storage-card">
+          <div class="storage-card-header">
+            <span>SQLite 主数据库</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+          </div>
+          <strong id="size-db" class="font-heading">—</strong>
+        </article>
+        <article class="panel storage-card">
+          <div class="storage-card-header">
+            <span>WAL / SHM 临时缓存</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+          </div>
+          <strong id="size-wal" class="font-heading">—</strong>
+        </article>
+        <article class="panel storage-card">
+          <div class="storage-card-header">
+            <span>待导入 spool 目录</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+          </div>
+          <strong id="size-spool" class="font-heading">—</strong>
+        </article>
+        <article class="panel storage-card">
+          <div class="storage-card-header">
+            <span>持久化记录总量</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+          </div>
+          <strong id="record-count" class="font-heading">—</strong>
+        </article>
       </div>
+
       <div class="panel storage-control">
-        <div>
-          <p class="eyebrow danger-text">不可撤销操作</p>
-          <h2>按时间清理日志</h2>
-          <p class="muted">只删除响应和系统诊断；不会删除 Bot 当前状态或未导入 spool。</p>
+        <div class="storage-control-header">
+          <div class="danger-badge">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+            不可撤销高危操作
+          </div>
+          <h2>按时间清理日志与回收空间</h2>
+          <p class="muted">仅安全清理过期事件响应及系统诊断日志；绝不会删除 Bot 当前状态或待导入的 spool 临时数据。</p>
         </div>
-        <label>快捷截止时间
-          <select id="cleanup-period">
-            <option value="1">一个月前</option>
-            <option value="3" selected>三个月前</option>
-            <option value="6">六个月前</option>
-            <option value="12">一年前</option>
-            <option value="custom">自定义</option>
-          </select>
-        </label>
-        <label>精确截止时间（GMT+8）
-          <input id="cleanup-cutoff" type="datetime-local" step="1">
-        </label>
-        <div id="cleanup-preview" class="preview muted">请先预览将要删除的记录。</div>
+
+        <div class="cleanup-form-grid">
+          <label>快捷截止时间
+            <select id="cleanup-period">
+              <option value="1">一个月前</option>
+              <option value="3" selected>三个月前</option>
+              <option value="6">六个月前</option>
+              <option value="12">一年前</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <label>精确截止时间（GMT+8）
+            <input id="cleanup-cutoff" type="datetime-local" step="1">
+          </label>
+        </div>
+
+        <div id="cleanup-preview" class="preview muted">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+          <span>请先预览将要删除的记录数据。</span>
+        </div>
+
         <div class="storage-actions">
-          <button id="preview-cleanup" class="primary">预览清理</button>
-          <button id="execute-cleanup" class="danger" disabled>确认后清理</button>
-          <button id="reclaim-storage">仅回收空闲页</button>
+          <button id="preview-cleanup" class="primary">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            预览清理范围
+          </button>
+          <button id="execute-cleanup" class="danger" disabled>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            确认后清理
+          </button>
+          <button id="reclaim-storage" class="secondary">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+            仅回收空闲页 (VACUUM)
+          </button>
         </div>
       </div>
     </section>
   </main>
 
   <dialog id="detail-dialog">
-    <form method="dialog" class="dialog-head">
-      <div><p class="eyebrow">RESPONSE DETAIL</p><h2 id="detail-title">响应详情</h2></div>
-      <button class="icon-button" aria-label="关闭">×</button>
-    </form>
-    <div id="detail-meta" class="detail-meta"></div>
-    <div id="raw-actions" class="raw-actions"></div>
-    <pre id="raw-content" class="raw-content">选择上方内容查看完整原始数据。</pre>
+    <div class="dialog-container">
+      <form method="dialog" class="dialog-head">
+        <div>
+          <p class="eyebrow">RESPONSE DETAIL</p>
+          <h2 id="detail-title">响应详情</h2>
+        </div>
+        <button class="icon-button" aria-label="关闭" type="submit">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </form>
+      <div class="dialog-body">
+        <div id="detail-meta" class="detail-meta"></div>
+        <div id="raw-actions" class="raw-actions"></div>
+        <div class="raw-content-wrapper">
+          <div class="raw-content-toolbar">
+            <span class="toolbar-title font-mono">Payload & Logs</span>
+            <button id="copy-raw-btn" class="copy-btn hidden" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              复制数据
+            </button>
+          </div>
+          <pre id="raw-content" class="raw-content font-mono">选择上方内容查看完整原始数据。</pre>
+        </div>
+      </div>
+    </div>
   </dialog>
 
-  <div id="toast" class="toast hidden" role="status"></div>
+  <div id="toast" class="toast hidden" role="status">
+    <div class="toast-content">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+      <span id="toast-message"></span>
+    </div>
+  </div>
   <script src="/app.js" defer></script>
 </body>
 </html>
