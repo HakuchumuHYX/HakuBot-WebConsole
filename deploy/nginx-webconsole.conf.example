@@ -1,0 +1,94 @@
+# Required additions inside the existing nginx.conf http {} block:
+#
+# limit_req_zone $binary_remote_addr zone=webconsole:10m rate=10r/s;
+# log_format webconsole
+#     '$remote_addr - $remote_user [$time_local] '
+#     '"$request_method $uri $server_protocol" $status $body_bytes_sent '
+#     '"$http_referer" "$http_user_agent"';
+
+server {
+    listen 54321 ssl;
+    listen [::]:54321 ssl;
+    server_name __PUBLIC_IP_OR_HOST__;
+
+    ssl_certificate     __TLS_FULLCHAIN_PATH__;
+    ssl_certificate_key __TLS_PRIVATE_KEY_PATH__;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:WEBCONSOLE_SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    auth_basic "HakuBot WebConsole";
+    auth_basic_user_file __HTPASSWD_PATH__;
+
+    access_log __NGINX_LOG_DIR__/webconsole_access.log webconsole;
+    error_log  __NGINX_LOG_DIR__/webconsole_error.log warn;
+
+    limit_req zone=webconsole burst=20 nodelay;
+    limit_req_status 429;
+    limit_conn perip 10;
+    client_max_body_size 16k;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    add_header Cache-Control "no-store" always;
+
+    location = /healthz { return 404; }
+    location = /readyz  { return 404; }
+
+    location = /api/storage/cleanup/preview {
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+    }
+
+    location = /api/storage/cleanup {
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+    }
+
+    location = /api/storage/reclaim {
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+    }
+
+    location = /api/stream {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        gzip off;
+    }
+
+    location ~ ^/api/events/[0-9]+/raw/(input|output|logs)$ {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_buffering off;
+        proxy_read_timeout 10m;
+    }
+
+    location ~ ^/api/diagnostics/[0-9]+$ {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_buffering off;
+        proxy_read_timeout 10m;
+    }
+
+    location / {
+        limit_except GET { deny all; }
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+    }
+}

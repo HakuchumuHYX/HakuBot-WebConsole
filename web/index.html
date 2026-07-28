@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>HakuBot WebConsole</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">HAKUBOT / NONEBOT</p>
+      <h1>事件响应控制台</h1>
+    </div>
+    <div class="status-area">
+      <span id="bot-status" class="status offline">
+        <span class="status-dot"></span>
+        <span>离线</span>
+      </span>
+      <span id="current-time" class="muted">当前时间 · GMT+8</span>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="控制台视图">
+    <button class="tab active" data-view="events">事件响应</button>
+    <button class="tab" data-view="diagnostics">系统警告 / 错误</button>
+    <button class="tab" data-view="storage">存储管理</button>
+  </nav>
+
+  <main>
+    <section id="view-events" class="view active">
+      <form id="event-filters" class="panel filters">
+        <label>状态
+          <select name="status">
+            <option value="">全部</option>
+            <option value="success">成功</option>
+            <option value="failure">失败</option>
+          </select>
+        </label>
+        <label>快捷时间
+          <select name="quick_time">
+            <option value="1h">最近 1 小时</option>
+            <option value="24h" selected>最近 24 小时</option>
+            <option value="7d">最近 7 天</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <label>开始时间（GMT+8）
+          <input name="from" type="datetime-local" step="1">
+        </label>
+        <label>结束时间（GMT+8）
+          <input name="to" type="datetime-local" step="1">
+        </label>
+        <label>群号
+          <select name="group_id"><option value="">全部群</option></select>
+        </label>
+        <label>插件
+          <select name="plugin"><option value="">全部插件</option></select>
+        </label>
+        <div class="filter-actions">
+          <button type="submit" class="primary">应用筛选</button>
+          <button type="button" id="clear-filters">清除</button>
+          <span class="muted refresh-note">每 3 秒自动刷新</span>
+        </div>
+      </form>
+
+      <div id="stats" class="stats" aria-live="polite">
+        <article><span>响应总数</span><strong id="stat-total">—</strong></article>
+        <article><span>成功</span><strong id="stat-success">—</strong></article>
+        <article><span>失败</span><strong id="stat-failure">—</strong></article>
+        <article><span>成功率</span><strong id="stat-rate">—</strong></article>
+      </div>
+
+      <div class="panel table-panel">
+        <div class="table-title">
+          <h2>真实响应</h2>
+          <span class="muted">只记录发送或实际故障的 Matcher</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>时间（GMT+8）</th><th>状态</th><th>插件</th>
+                <th>群 / 用户</th><th>输入</th><th>输出</th><th>耗时</th>
+              </tr>
+            </thead>
+            <tbody id="event-rows"></tbody>
+          </table>
+        </div>
+        <div id="event-empty" class="empty hidden">当前筛选条件下没有响应记录。</div>
+        <button id="load-more" class="load-more hidden">加载更多</button>
+      </div>
+    </section>
+
+    <section id="view-diagnostics" class="view">
+      <form id="diagnostic-filters" class="panel filters compact">
+        <label>级别
+          <select name="level">
+            <option value="">全部</option>
+            <option value="WARNING">WARNING</option>
+            <option value="ERROR">ERROR</option>
+            <option value="CRITICAL">CRITICAL</option>
+          </select>
+        </label>
+        <label>插件
+          <select name="plugin"><option value="">全部插件</option></select>
+        </label>
+        <button type="submit" class="primary">应用筛选</button>
+      </form>
+      <div class="panel table-panel">
+        <div class="table-title"><h2>完整系统诊断</h2></div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>时间（GMT+8）</th><th>级别</th><th>插件 / 模块</th><th>内容</th></tr>
+            </thead>
+            <tbody id="diagnostic-rows"></tbody>
+          </table>
+        </div>
+        <div id="diagnostic-empty" class="empty hidden">没有系统警告或错误。</div>
+        <button id="diagnostic-more" class="load-more hidden">加载更多</button>
+      </div>
+    </section>
+
+    <section id="view-storage" class="view">
+      <div class="storage-grid">
+        <article class="panel storage-card"><span>SQLite</span><strong id="size-db">—</strong></article>
+        <article class="panel storage-card"><span>WAL / SHM</span><strong id="size-wal">—</strong></article>
+        <article class="panel storage-card"><span>待导入 spool</span><strong id="size-spool">—</strong></article>
+        <article class="panel storage-card"><span>记录</span><strong id="record-count">—</strong></article>
+      </div>
+      <div class="panel storage-control">
+        <div>
+          <p class="eyebrow danger-text">不可撤销操作</p>
+          <h2>按时间清理日志</h2>
+          <p class="muted">只删除响应和系统诊断；不会删除 Bot 当前状态或未导入 spool。</p>
+        </div>
+        <label>快捷截止时间
+          <select id="cleanup-period">
+            <option value="1">一个月前</option>
+            <option value="3" selected>三个月前</option>
+            <option value="6">六个月前</option>
+            <option value="12">一年前</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <label>精确截止时间（GMT+8）
+          <input id="cleanup-cutoff" type="datetime-local" step="1">
+        </label>
+        <div id="cleanup-preview" class="preview muted">请先预览将要删除的记录。</div>
+        <div class="storage-actions">
+          <button id="preview-cleanup" class="primary">预览清理</button>
+          <button id="execute-cleanup" class="danger" disabled>确认后清理</button>
+          <button id="reclaim-storage">仅回收空闲页</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="detail-dialog">
+    <form method="dialog" class="dialog-head">
+      <div><p class="eyebrow">RESPONSE DETAIL</p><h2 id="detail-title">响应详情</h2></div>
+      <button class="icon-button" aria-label="关闭">×</button>
+    </form>
+    <div id="detail-meta" class="detail-meta"></div>
+    <div id="raw-actions" class="raw-actions"></div>
+    <pre id="raw-content" class="raw-content">选择上方内容查看完整原始数据。</pre>
+  </dialog>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

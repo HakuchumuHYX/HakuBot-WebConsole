@@ -1,0 +1,37 @@
+/bin/
+/data/
+
+# Local runtime configuration and environment overrides.
+/config.json
+.env
+.env.*
+!.env.example
+
+# Runtime state and logs.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.log
+
+# Credentials and certificates.
+*.pem
+*.key
+*.crt
+*.htpasswd
+
+# Local-only tests and development output.
+*_test.go
+/tests/
+coverage.out
+
+# Private production notes and rendered deployment files.
+/PLAN.md
+/deploy/*.candidate
+/deploy/*.before-*
+/deploy/*.local
+
+# Editor and operating-system files.
+.DS_Store
+.idea/
+.vscode/
