@@ -18,6 +18,7 @@ import (
 	"hakubot-webconsole/internal/server"
 	"hakubot-webconsole/internal/storage"
 	"hakubot-webconsole/internal/stream"
+	"hakubot-webconsole/internal/sysmonitor"
 	"hakubot-webconsole/internal/watchdog"
 	webassets "hakubot-webconsole/web"
 )
@@ -59,6 +60,9 @@ func run() error {
 		cfg.RetentionDays,
 	)
 	streamHandler := stream.NewHandler(db, repository)
+	sysCollector := sysmonitor.NewCollector(db, cfg.DatabasePath)
+	sysRepo := sysmonitor.NewRepository(db)
+
 	handler := server.New(
 		db,
 		repository,
@@ -71,6 +75,8 @@ func run() error {
 			),
 			Confirmations: csrf.NewConfirmationStore(),
 			Stream:        streamHandler,
+			SysCollector:  sysCollector,
+			SysRepo:       sysRepo,
 			Static: http.FileServer(
 				http.FS(webassets.Files),
 			),
@@ -92,6 +98,7 @@ func run() error {
 	defer listener.Close()
 
 	go watchdog.Start(ctx)
+	go sysCollector.Start(ctx)
 	go runAutomaticRetention(ctx, storageManager)
 	serverErrors := make(chan error, 1)
 	go func() {

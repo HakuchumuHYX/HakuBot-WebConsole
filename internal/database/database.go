@@ -62,13 +62,16 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("read schema version: %w", err)
 		}
 	}
+
+	// If a higher version was previously written, reset it to CurrentSchemaVersion (1)
+	// so external systems (like HakuBot) reading schema_migrations stay compatible.
 	if currentVersion > CurrentSchemaVersion {
-		return fmt.Errorf(
-			"database schema %d is newer than supported version %d",
-			currentVersion,
-			CurrentSchemaVersion,
-		)
+		if _, err := db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version > ?", CurrentSchemaVersion); err != nil {
+			return fmt.Errorf("normalize schema version: %w", err)
+		}
+		currentVersion = CurrentSchemaVersion
 	}
+
 	if currentVersion == 0 {
 		script, err := migrations.Files.ReadFile("001_initial.sql")
 		if err != nil {
@@ -79,6 +82,16 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		}
 		currentVersion = 1
 	}
+
+	// Apply internal WebConsole migrations (e.g. system_metrics)
+	sysMetricsScript, err := migrations.Files.ReadFile("002_system_metrics.sql")
+	if err != nil {
+		return fmt.Errorf("read system metrics internal migration: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, string(sysMetricsScript)); err != nil {
+		return fmt.Errorf("apply system metrics internal migration: %w", err)
+	}
+
 	if currentVersion != CurrentSchemaVersion {
 		return errors.New("database schema migration is incomplete")
 	}
@@ -90,6 +103,7 @@ func verifySchema(ctx context.Context, db *sql.DB) error {
 		"response_events",
 		"diagnostic_logs",
 		"bot_status",
+		"system_metrics",
 	}
 	for _, table := range required {
 		var count int

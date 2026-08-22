@@ -22,6 +22,7 @@ import (
 	"hakubot-webconsole/internal/database"
 	"hakubot-webconsole/internal/query"
 	"hakubot-webconsole/internal/storage"
+	"hakubot-webconsole/internal/sysmonitor"
 	"hakubot-webconsole/internal/timefmt"
 )
 
@@ -34,6 +35,8 @@ type Server struct {
 	confirmations *csrf.ConfirmationStore
 	stream        http.Handler
 	static        http.Handler
+	sysCollector  *sysmonitor.Collector
+	sysRepo       *sysmonitor.Repository
 	mux           *http.ServeMux
 }
 
@@ -43,6 +46,8 @@ type Options struct {
 	Confirmations *csrf.ConfirmationStore
 	Stream        http.Handler
 	Static        http.Handler
+	SysCollector  *sysmonitor.Collector
+	SysRepo       *sysmonitor.Repository
 }
 
 func New(
@@ -60,6 +65,8 @@ func New(
 		confirmations: options.Confirmations,
 		stream:        options.Stream,
 		static:        options.Static,
+		sysCollector:  options.SysCollector,
+		sysRepo:       options.SysRepo,
 		mux:           http.NewServeMux(),
 	}
 	server.routes()
@@ -86,6 +93,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/diagnostics/{id}", s.downloadDiagnostic)
 	s.mux.HandleFunc("GET /api/csrf", s.issueCSRF)
 	s.mux.HandleFunc("GET /api/storage", s.storageStats)
+	s.mux.HandleFunc("GET /api/system/status", s.systemStatus)
+	s.mux.HandleFunc("GET /api/system/history", s.systemHistory)
 	s.mux.HandleFunc(
 		"POST /api/storage/cleanup/preview",
 		s.cleanupPreview,
@@ -111,7 +120,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		header.Set(
 			"Content-Security-Policy",
 			"default-src 'self'; connect-src 'self'; "+
-				"img-src 'self' data:; style-src 'self'; script-src 'self'; "+
+				"img-src 'self' data:; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; "+
 				"frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 		)
 		next.ServeHTTP(writer, request)
@@ -671,6 +680,31 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	if err := json.NewEncoder(writer).Encode(value); err != nil {
 		slog.Error("encode JSON response", "error", err)
 	}
+}
+
+func (s *Server) systemStatus(writer http.ResponseWriter, _ *http.Request) {
+	if s.sysCollector == nil {
+		writeError(writer, http.StatusServiceUnavailable, "system monitor not enabled")
+		return
+	}
+	writeJSON(writer, http.StatusOK, s.sysCollector.GetStatus())
+}
+
+func (s *Server) systemHistory(writer http.ResponseWriter, request *http.Request) {
+	if s.sysRepo == nil {
+		writeError(writer, http.StatusServiceUnavailable, "system history repository not enabled")
+		return
+	}
+	window := request.URL.Query().Get("window")
+	if window == "" {
+		window = "1h"
+	}
+	history, err := s.sysRepo.GetHistory(request.Context(), window)
+	if err != nil {
+		s.internalError(writer, "get system history", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, history)
 }
 
 func writeError(writer http.ResponseWriter, status int, message string) {

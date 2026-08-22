@@ -9,6 +9,8 @@ const state = {
   clockTimer: null,
   refreshInFlight: false,
   refreshErrorShown: false,
+  systemWindow: "1h",
+  systemHistoryData: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -22,6 +24,15 @@ function toast(message) {
   element.classList.remove("hidden");
   clearTimeout(element._timer);
   element._timer = setTimeout(() => element.classList.add("hidden"), 4500);
+}
+
+function formatBytes(bytes, decimals = 1) {
+  if (bytes === 0 || !bytes) return "0 B";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i] || "B"}`;
 }
 
 async function api(path, options = {}) {
@@ -98,13 +109,6 @@ function textCell(value, className = "") {
   if (className) cell.className = className;
   cell.textContent = value || "—";
   return cell;
-}
-
-function pluginModuleLabel(pluginName, moduleName, loggerName = "") {
-  const plugin = String(pluginName || loggerName || "").trim();
-  const module = String(moduleName || "").trim();
-  if (plugin && module && plugin !== module) return `${plugin} / ${module}`;
-  return plugin || module || "系统";
 }
 
 function statusBadge(status) {
@@ -260,19 +264,11 @@ async function loadDiagnostics({ append = false } = {}) {
     row.append(
       textCell(item.time_display),
       level,
-      textCell(pluginModuleLabel(
-        item.plugin_name,
-        item.module_name,
-        item.logger_name,
-      )),
+      textCell(item.plugin_name || item.module_name || item.logger_name),
       textCell(item.message_summary, "summary"),
     );
     row.addEventListener("click", async () => {
-      $("#detail-title").textContent = `${item.level} · ${pluginModuleLabel(
-        item.plugin_name,
-        item.module_name,
-        item.logger_name,
-      )}`;
+      $("#detail-title").textContent = `${item.level} · ${item.plugin_name || item.module_name || "系统"}`;
       $("#detail-meta").replaceChildren();
       $("#raw-actions").replaceChildren();
       if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
@@ -302,6 +298,355 @@ async function loadStorage() {
   $("#size-wal").textContent = `${data.wal.display} / ${data.shm.display}`;
   $("#size-spool").textContent = `${data.spool.display} · ${data.spool_files} 个文件`;
   $("#record-count").textContent = `${data.response_count} 响应 / ${data.diagnostic_count} 诊断`;
+}
+
+async function loadSystemStatus() {
+  const status = await (await api("/api/system/status")).json();
+  if ($("#sys-hostname")) $("#sys-hostname").textContent = status.hostname || "—";
+  if ($("#sys-os-kernel")) $("#sys-os-kernel").textContent = `${status.os} / ${status.kernel} (${status.arch})`;
+  if ($("#sys-cpu-model")) $("#sys-cpu-model").textContent = status.cpu_model || `${status.cpu_cores} 核`;
+  if ($("#sys-uptime-system")) $("#sys-uptime-system").textContent = status.system_uptime_desc || "—";
+  if ($("#sys-uptime-proc")) $("#sys-uptime-proc").textContent = status.process_uptime_desc || "—";
+
+  const curr = status.current || {};
+  if ($("#sys-cpu-pct")) $("#sys-cpu-pct").textContent = `${(curr.cpu_percent || 0).toFixed(1)}%`;
+  if ($("#sys-cpu-bar")) $("#sys-cpu-bar").style.width = `${Math.min(100, Math.max(0, curr.cpu_percent || 0))}%`;
+  if ($("#sys-cpu-cores-badge")) $("#sys-cpu-cores-badge").textContent = `${status.cpu_cores} 核`;
+
+  if ($("#sys-mem-pct")) $("#sys-mem-pct").textContent = `${(curr.memory_percent || 0).toFixed(1)}%`;
+  if ($("#sys-mem-bar")) $("#sys-mem-bar").style.width = `${Math.min(100, Math.max(0, curr.memory_percent || 0))}%`;
+  if ($("#sys-mem-text")) $("#sys-mem-text").textContent = `${formatBytes(curr.memory_used_bytes)} / ${formatBytes(curr.memory_total_bytes)}`;
+  if ($("#sys-swap-text")) $("#sys-swap-text").textContent = `${formatBytes(curr.swap_used_bytes)} / ${formatBytes(curr.swap_total_bytes)}`;
+
+  if ($("#sys-disk-pct")) $("#sys-disk-pct").textContent = `${(curr.disk_percent || 0).toFixed(1)}%`;
+  if ($("#sys-disk-bar")) $("#sys-disk-bar").style.width = `${Math.min(100, Math.max(0, curr.disk_percent || 0))}%`;
+  if ($("#sys-disk-text")) $("#sys-disk-text").textContent = `${formatBytes(curr.disk_used_bytes)} / ${formatBytes(curr.disk_total_bytes)}`;
+
+  if ($("#sys-load-text")) $("#sys-load-text").textContent = `${(curr.load1 || 0).toFixed(2)} / ${(curr.load5 || 0).toFixed(2)} / ${(curr.load15 || 0).toFixed(2)}`;
+  if ($("#sys-procs-text")) $("#sys-procs-text").textContent = `${curr.process_count || 0}`;
+  if ($("#sys-goroutines-text")) $("#sys-goroutines-text").textContent = `${status.goroutines || 0} (${formatBytes(status.go_heap_alloc_bytes)})`;
+
+  if ($("#sys-net-rx")) $("#sys-net-rx").textContent = `↓ ${formatBytes(curr.net_rx_bytes_per_sec)}/s`;
+  if ($("#sys-net-tx")) $("#sys-net-tx").textContent = `↑ ${formatBytes(curr.net_tx_bytes_per_sec)}/s`;
+}
+
+async function loadSystemHistory(window = state.systemWindow) {
+  const data = await (await api(`/api/system/history?window=${window}`)).json();
+  state.systemHistoryData = data;
+  const points = data.points || [];
+  const fromMs = data.from_ms;
+  const toMs = data.to_ms;
+
+  if (points.length > 0) {
+    const last = points[points.length - 1];
+    let maxCPU = 0;
+    for (const p of points) {
+      if (p.cpu_max > maxCPU) maxCPU = p.cpu_max;
+      if (p.cpu_percent > maxCPU) maxCPU = p.cpu_percent;
+    }
+    if ($("#chart-cpu-stat")) $("#chart-cpu-stat").textContent = `当前: ${last.cpu_percent.toFixed(1)}% | 峰值: ${maxCPU.toFixed(1)}%`;
+    if ($("#chart-mem-stat")) $("#chart-mem-stat").textContent = `当前: ${last.memory_percent.toFixed(1)}% (${formatBytes(last.memory_used_bytes)})`;
+    if ($("#chart-net-stat")) $("#chart-net-stat").textContent = `下行: ${formatBytes(last.net_rx_bytes_per_sec)}/s | 上行: ${formatBytes(last.net_tx_bytes_per_sec)}/s`;
+  }
+
+  // Render CPU Chart
+  renderSVGChart("chart-cpu-container", {
+    points,
+    fromMs,
+    toMs,
+    window,
+    series: [
+      { key: "cpu_percent", color: "#38bdf8", gradientId: "grad-cpu", label: "CPU 使用率", unit: "%" },
+    ],
+    yMin: 0,
+    yMax: 100,
+    gridSteps: 4,
+    formatY: v => `${Math.round(v)}%`,
+    formatTooltip: (p) => `${p.time_display}<br>CPU 使用率: <b>${p.cpu_percent.toFixed(1)}%</b> (峰值: ${p.cpu_max.toFixed(1)}%)`,
+  });
+
+  // Render Memory Chart
+  renderSVGChart("chart-mem-container", {
+    points,
+    fromMs,
+    toMs,
+    window,
+    series: [
+      { key: "memory_percent", color: "#c084fc", gradientId: "grad-mem", label: "内存使用率", unit: "%" },
+    ],
+    yMin: 0,
+    yMax: 100,
+    gridSteps: 4,
+    formatY: v => `${Math.round(v)}%`,
+    formatTooltip: (p) => `${p.time_display}<br>内存占用: <b>${p.memory_percent.toFixed(1)}%</b> (${formatBytes(p.memory_used_bytes)})`,
+  });
+
+  // Render Network Chart
+  let maxNet = 1024;
+  for (const p of points) {
+    if (p.net_rx_bytes_per_sec > maxNet) maxNet = p.net_rx_bytes_per_sec;
+    if (p.net_tx_bytes_per_sec > maxNet) maxNet = p.net_tx_bytes_per_sec;
+  }
+
+  function niceNetCeiling(val) {
+    const steps = [
+      1024, // 1 KB/s
+      4 * 1024, // 4 KB/s
+      8 * 1024, // 8 KB/s
+      16 * 1024, // 16 KB/s
+      32 * 1024, // 32 KB/s
+      64 * 1024, // 64 KB/s
+      128 * 1024, // 128 KB/s
+      256 * 1024, // 256 KB/s
+      512 * 1024, // 512 KB/s
+      1024 * 1024, // 1 MB/s
+      2 * 1024 * 1024, // 2 MB/s
+      4 * 1024 * 1024, // 4 MB/s
+      8 * 1024 * 1024, // 8 MB/s
+      16 * 1024 * 1024, // 16 MB/s
+      32 * 1024 * 1024, // 32 MB/s
+      64 * 1024 * 1024, // 64 MB/s
+      128 * 1024 * 1024, // 128 MB/s
+    ];
+    for (const s of steps) {
+      if (val <= s) return s;
+    }
+    return Math.ceil(val / (1024 * 1024 * 4)) * (1024 * 1024 * 4);
+  }
+
+  const roundedMaxNet = niceNetCeiling(maxNet * 1.05);
+
+  renderSVGChart("chart-net-container", {
+    points,
+    fromMs,
+    toMs,
+    window,
+    series: [
+      { key: "net_rx_bytes_per_sec", color: "#2dd4bf", gradientId: "grad-rx", label: "下行 (RX)", unit: "B/s" },
+      { key: "net_tx_bytes_per_sec", color: "#c084fc", gradientId: "grad-tx", label: "上行 (TX)", unit: "B/s" },
+    ],
+    yMin: 0,
+    yMax: roundedMaxNet,
+    gridSteps: 4,
+    formatY: v => v === 0 ? "0 B/s" : `${formatBytes(v, 0)}/s`,
+    formatTooltip: (p) => `${p.time_display}<br>下行速率: <b>${formatBytes(p.net_rx_bytes_per_sec)}/s</b><br>上行速率: <b>${formatBytes(p.net_tx_bytes_per_sec)}/s</b>`,
+  });
+}
+
+function renderSVGChart(containerId, options) {
+  const container = $(`#${containerId}`);
+  if (!container) return;
+
+  const {
+    points = [],
+    series = [],
+    fromMs = (Date.now() - 3600000),
+    toMs = Date.now(),
+    window = "1h",
+    yMin = 0,
+    yMax = 100,
+    gridSteps = 4,
+    formatY = (v) => v,
+    formatTooltip,
+  } = options;
+
+  const containerRect = container.getBoundingClientRect();
+  const svgWidth = Math.max(280, Math.floor(containerRect.width || container.clientWidth || 600));
+  const svgHeight = 200;
+  const padLeft = 68;
+  const padRight = 18;
+  const padTop = 16;
+  const padBottom = 28;
+
+  const plotWidth = Math.max(10, svgWidth - padLeft - padRight);
+  const plotHeight = Math.max(10, svgHeight - padTop - padBottom);
+
+  const timeSpan = Math.max(1000, toMs - fromMs);
+  const yRange = yMax - yMin || 1;
+
+  const getX = (timestampMs) => {
+    const clamped = Math.max(fromMs, Math.min(toMs, timestampMs || fromMs));
+    return padLeft + ((clamped - fromMs) / timeSpan) * plotWidth;
+  };
+
+  const getY = (val) => {
+    const clamped = Math.max(yMin, Math.min(yMax, val || 0));
+    return padTop + plotHeight - ((clamped - yMin) / yRange) * plotHeight;
+  };
+
+  // Build Horizontal Grid Lines & Y Labels
+  let gridSVG = "";
+  for (let i = 0; i <= gridSteps; i++) {
+    const val = yMin + (i / gridSteps) * yRange;
+    const yPos = getY(val);
+    if (i > 0 && i < gridSteps) {
+      gridSVG += `
+        <line x1="${padLeft}" y1="${yPos}" x2="${svgWidth - padRight}" y2="${yPos}" stroke="rgba(255,255,255,0.06)" stroke-dasharray="4 4" />
+      `;
+    }
+    gridSVG += `
+      <text x="${padLeft - 8}" y="${yPos + 3.5}" fill="#8493a8" font-size="11" text-anchor="end" font-family="'JetBrains Mono', monospace">${formatY(val)}</text>
+    `;
+  }
+
+  // Coordinate Frame Baselines (Left Y-axis line and Bottom X-axis line)
+  const baselineFrameSVG = `
+    <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotHeight}" stroke="rgba(255,255,255,0.18)" stroke-width="1.2" />
+    <line x1="${padLeft}" y1="${padTop + plotHeight}" x2="${svgWidth - padRight}" y2="${padTop + plotHeight}" stroke="rgba(255,255,255,0.18)" stroke-width="1.2" />
+  `;
+
+  // Fixed X Time Ticks & Time Labels based on the actual window [fromMs, toMs]
+  let xLabelsSVG = "";
+  const xTickCount = svgWidth < 420 ? 2 : (svgWidth < 680 ? 3 : 4);
+  for (let i = 0; i <= xTickCount; i++) {
+    const tickMs = fromMs + (i / xTickCount) * timeSpan;
+    const xPos = padLeft + (i / xTickCount) * plotWidth;
+    const anchor = i === 0 ? "start" : i === xTickCount ? "end" : "middle";
+
+    const tickDate = new Date(tickMs);
+    const pParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(tickDate);
+    const parts = Object.fromEntries(pParts.map(({ type, value }) => [type, value]));
+
+    let timeText = `${parts.hour}:${parts.minute}`;
+    if (window === "24h" || window === "7d") {
+      timeText = `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+    } else if (window === "30m" || window === "1h") {
+      timeText = `${parts.hour}:${parts.minute}:${parts.second}`;
+    }
+
+    xLabelsSVG += `
+      <line x1="${xPos}" y1="${padTop + plotHeight}" x2="${xPos}" y2="${padTop + plotHeight + 5}" stroke="rgba(255,255,255,0.3)" stroke-width="1.2" />
+      <text x="${xPos}" y="${padTop + plotHeight + 19}" fill="#8493a8" font-size="11" text-anchor="${anchor}" font-family="'JetBrains Mono', monospace">${timeText}</text>
+    `;
+  }
+
+  // Build Gradients & Series Paths
+  let defsSVG = "";
+  let pathsSVG = "";
+
+  if (points.length === 0) {
+    pathsSVG = `<text x="${padLeft + plotWidth / 2}" y="${padTop + plotHeight / 2}" fill="#8493a8" font-size="12" text-anchor="middle" font-family="'JetBrains Mono', monospace">暂无时序数据</text>`;
+  } else {
+    series.forEach((s) => {
+      const gradId = `${containerId}-${s.gradientId}`;
+      defsSVG += `
+        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${s.color}" stop-opacity="0.35" />
+          <stop offset="100%" stop-color="${s.color}" stop-opacity="0.0" />
+        </linearGradient>
+      `;
+
+      const pts = points.map((p) => ({ x: getX(p.timestamp_ms), y: getY(p[s.key]) }));
+
+      if (pts.length === 1) {
+        pathsSVG += `<circle cx="${pts[0].x.toFixed(1)}" cy="${pts[0].y.toFixed(1)}" r="3.5" fill="${s.color}" />`;
+      } else {
+        // Area Path (anchored from first point's X to last point's X)
+        let areaD = `M ${pts[0].x.toFixed(1)} ${(padTop + plotHeight).toFixed(1)}`;
+        pts.forEach((pt) => {
+          areaD += ` L ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`;
+        });
+        areaD += ` L ${pts[pts.length - 1].x.toFixed(1)} ${(padTop + plotHeight).toFixed(1)} Z`;
+
+        // Line Path
+        let lineD = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+        for (let i = 1; i < pts.length; i++) {
+          lineD += ` L ${pts[i].x.toFixed(1)} ${pts[i].y.toFixed(1)}`;
+        }
+
+        pathsSVG += `
+          <path d="${areaD}" fill="url(#${gradId})" />
+          <path d="${lineD}" fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+        `;
+      }
+    });
+  }
+
+  const svgHTML = `
+    <svg width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" style="display: block; width: 100%; height: 100%;">
+      <defs>${defsSVG}</defs>
+      ${gridSVG}
+      ${baselineFrameSVG}
+      ${pathsSVG}
+      ${xLabelsSVG}
+      <line id="${containerId}-crosshair" x1="0" y1="${padTop}" x2="0" y2="${padTop + plotHeight}" stroke="rgba(255,255,255,0.4)" stroke-dasharray="3 3" style="display: none;" />
+      ${series.map(s => `<circle id="${containerId}-dot-${s.key}" r="4.5" fill="${s.color}" stroke="#ffffff" stroke-width="1.8" style="display: none;" />`).join("")}
+      <rect id="${containerId}-overlay" x="${padLeft}" y="${padTop}" width="${plotWidth}" height="${plotHeight}" fill="transparent" style="cursor: crosshair;" />
+    </svg>
+    <div id="${containerId}-tooltip" class="chart-tooltip-floating font-mono" style="display: none; opacity: 0;"></div>
+  `;
+
+  container.innerHTML = svgHTML;
+
+  // Interactive crosshair & hover tooltip by nearest timestamp
+  const overlay = $(`#${containerId}-overlay`, container);
+  const crosshair = $(`#${containerId}-crosshair`, container);
+  const tooltip = $(`#${containerId}-tooltip`, container);
+
+  if (overlay && tooltip && points.length > 0) {
+    const handleMove = (clientX) => {
+      const rect = container.getBoundingClientRect();
+      const relativeX = clientX - rect.left - padLeft;
+      const hoverPct = Math.max(0, Math.min(1, relativeX / plotWidth));
+      const hoverMs = fromMs + hoverPct * timeSpan;
+
+      // Find nearest point
+      let closestPoint = points[0];
+      let minDiff = Math.abs(points[0].timestamp_ms - hoverMs);
+      for (let i = 1; i < points.length; i++) {
+        const diff = Math.abs(points[i].timestamp_ms - hoverMs);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closestPoint = points[i];
+        }
+      }
+
+      if (closestPoint) {
+        const ptX = getX(closestPoint.timestamp_ms);
+
+        crosshair.setAttribute("x1", ptX);
+        crosshair.setAttribute("x2", ptX);
+        crosshair.style.display = "block";
+
+        series.forEach((s) => {
+          const dot = $(`#${containerId}-dot-${s.key}`, container);
+          if (dot) {
+            dot.setAttribute("cx", ptX);
+            dot.setAttribute("cy", getY(closestPoint[s.key]));
+            dot.style.display = "block";
+          }
+        });
+
+        tooltip.innerHTML = formatTooltip ? formatTooltip(closestPoint) : `${closestPoint.time_display}`;
+        tooltip.style.left = `${Math.max(60, Math.min(svgWidth - 60, ptX))}px`;
+        tooltip.style.top = `${getY(closestPoint[series[0].key]) - 10}px`;
+        tooltip.style.display = "block";
+        tooltip.style.opacity = "1";
+      }
+    };
+
+    const handleLeave = () => {
+      crosshair.style.display = "none";
+      series.forEach((s) => {
+        const dot = $(`#${containerId}-dot-${s.key}`, container);
+        if (dot) dot.style.display = "none";
+      });
+      tooltip.style.display = "none";
+      tooltip.style.opacity = "0";
+    };
+
+    overlay.addEventListener("mousemove", (e) => handleMove(e.clientX));
+    overlay.addEventListener("mouseleave", handleLeave);
+    overlay.addEventListener("touchmove", (e) => {
+      if (e.touches && e.touches[0]) handleMove(e.touches[0].clientX);
+    }, { passive: true });
+    overlay.addEventListener("touchend", handleLeave);
+  }
 }
 
 function calendarMonthsAgo(months) {
@@ -383,6 +728,10 @@ async function refreshVisibleView() {
   if (activeView === "events") requests.push(loadEvents());
   if (activeView === "diagnostics") requests.push(loadDiagnostics());
   if (activeView === "storage") requests.push(loadStorage());
+  if (activeView === "system") {
+    requests.push(loadSystemStatus());
+    requests.push(loadSystemHistory(state.systemWindow));
+  }
   try {
     await Promise.all(requests);
     state.refreshErrorShown = false;
@@ -411,6 +760,9 @@ function bindEvents() {
     if (button.dataset.view === "events") loadEvents().catch(error => toast(error.message));
     if (button.dataset.view === "diagnostics") loadDiagnostics().catch(error => toast(error.message));
     if (button.dataset.view === "storage") loadStorage().catch(error => toast(error.message));
+    if (button.dataset.view === "system") {
+      Promise.all([loadSystemStatus(), loadSystemHistory(state.systemWindow)]).catch(error => toast(error.message));
+    }
   }));
   $("#event-filters").addEventListener("submit", event => {
     event.preventDefault();
@@ -449,6 +801,26 @@ function bindEvents() {
       await loadStorage();
     } catch (error) { toast(error.message); }
   });
+
+  // Chart range selector buttons
+  $$("#chart-range-selector .chart-range-btn").forEach(button => {
+    button.addEventListener("click", () => {
+      $$("#chart-range-selector .chart-range-btn").forEach(b => b.classList.toggle("active", b === button));
+      state.systemWindow = button.dataset.window || "1h";
+      loadSystemHistory(state.systemWindow).catch(error => toast(error.message));
+    });
+  });
+
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if ($(".tab.active")?.dataset.view === "system" && state.systemHistoryData) {
+        loadSystemHistory(state.systemWindow).catch(() => {});
+      }
+    }, 150);
+  });
+
   if ($("#copy-raw-btn")) {
     $("#copy-raw-btn").addEventListener("click", () => {
       const text = $("#raw-content").textContent;
@@ -473,7 +845,7 @@ async function initialize() {
   setQuickRange("24h");
   updateCleanupCutoff();
   try {
-    await Promise.all([loadFilters(), loadBotStatus(), loadEvents(), loadDiagnostics()]);
+    await Promise.all([loadFilters(), loadBotStatus(), loadEvents(), loadDiagnostics(), loadSystemStatus()]);
   } catch (error) {
     toast(`初始化失败：${error.message}`);
   }

@@ -66,6 +66,15 @@
         </svg>
         <span>存储管理</span>
       </button>
+      <button class="tab" data-view="system">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+          <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+          <line x1="6" y1="6" x2="6.01" y2="6"></line>
+          <line x1="6" y1="18" x2="6.01" y2="18"></line>
+        </svg>
+        <span>服务器状态</span>
+      </button>
     </div>
   </nav>
 
@@ -314,6 +323,176 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
             仅回收空闲页 (VACUUM)
           </button>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-system" class="view">
+      <!-- Host & OS info banner -->
+      <div class="panel system-banner">
+        <div class="system-banner-item">
+          <span class="banner-label">主机名</span>
+          <strong id="sys-hostname" class="font-mono">—</strong>
+        </div>
+        <div class="system-banner-item">
+          <span class="banner-label">系统 / 内核</span>
+          <strong id="sys-os-kernel">—</strong>
+        </div>
+        <div class="system-banner-item">
+          <span class="banner-label">CPU 架构 / 型号</span>
+          <strong id="sys-cpu-model">—</strong>
+        </div>
+        <div class="system-banner-item">
+          <span class="banner-label">系统运行时间</span>
+          <strong id="sys-uptime-system" class="font-mono">—</strong>
+        </div>
+        <div class="system-banner-item">
+          <span class="banner-label">WebConsole 运行时间</span>
+          <strong id="sys-uptime-proc" class="font-mono">—</strong>
+        </div>
+      </div>
+
+      <!-- Real-time metrics card grid -->
+      <div class="system-metrics-grid">
+        <!-- CPU Card -->
+        <article class="panel system-metric-card">
+          <div class="metric-card-top">
+            <div class="metric-icon-box metric-icon-blue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="15" x2="23" y2="15"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="15" x2="4" y2="15"></line></svg>
+            </div>
+            <div>
+              <span class="metric-name">CPU 使用率</span>
+              <strong id="sys-cpu-pct" class="metric-value font-heading">—</strong>
+            </div>
+            <span id="sys-cpu-cores-badge" class="metric-sub-badge font-mono">-- 核</span>
+          </div>
+          <div class="metric-progress-wrapper">
+            <div class="metric-progress-bar"><div id="sys-cpu-bar" class="progress-fill progress-blue" style="width: 0%;"></div></div>
+          </div>
+        </article>
+
+        <!-- Memory Card -->
+        <article class="panel system-metric-card">
+          <div class="metric-card-top">
+            <div class="metric-icon-box metric-icon-purple">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 19v-3"></path><path d="M10 19v-3"></path><path d="M14 19v-3"></path><path d="M18 19v-3"></path><path d="M6 8V5"></path><path d="M10 8V5"></path><path d="M14 8V5"></path><path d="M18 8V5"></path><rect x="2" y="8" width="20" height="8" rx="1"></rect></svg>
+            </div>
+            <div>
+              <span class="metric-name">内存使用率 (RAM)</span>
+              <strong id="sys-mem-pct" class="metric-value font-heading">—</strong>
+            </div>
+            <span id="sys-mem-text" class="metric-sub-badge font-mono">— / —</span>
+          </div>
+          <div class="metric-progress-wrapper">
+            <div class="metric-progress-bar"><div id="sys-mem-bar" class="progress-fill progress-purple" style="width: 0%;"></div></div>
+            <div class="metric-sub-detail">
+              <span>Swap 交换区: <strong id="sys-swap-text" class="font-mono">— / —</strong></span>
+            </div>
+          </div>
+        </article>
+
+        <!-- Disk Card -->
+        <article class="panel system-metric-card">
+          <div class="metric-card-top">
+            <div class="metric-icon-box metric-icon-green">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+            </div>
+            <div>
+              <span class="metric-name">主磁盘占用</span>
+              <strong id="sys-disk-pct" class="metric-value font-heading">—</strong>
+            </div>
+            <span id="sys-disk-text" class="metric-sub-badge font-mono">— / —</span>
+          </div>
+          <div class="metric-progress-wrapper">
+            <div class="metric-progress-bar"><div id="sys-disk-bar" class="progress-fill progress-green" style="width: 0%;"></div></div>
+          </div>
+        </article>
+
+        <!-- Load Card -->
+        <article class="panel system-metric-card">
+          <div class="metric-card-top">
+            <div class="metric-icon-box metric-icon-yellow">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+            </div>
+            <div>
+              <span class="metric-name">系统平均负载 (1/5/15m)</span>
+              <strong id="sys-load-text" class="metric-value font-mono" style="font-size: 1.15rem;">— / — / —</strong>
+            </div>
+          </div>
+          <div class="metric-sub-detail" style="margin-top: 0.5rem;">
+            <span>活跃进程: <strong id="sys-procs-text" class="font-mono">—</strong></span>
+            <span>Goroutines: <strong id="sys-goroutines-text" class="font-mono">—</strong></span>
+          </div>
+        </article>
+
+        <!-- Network I/O Card -->
+        <article class="panel system-metric-card">
+          <div class="metric-card-top">
+            <div class="metric-icon-box metric-icon-cyan">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+            </div>
+            <div>
+              <span class="metric-name">实时网络吞吐</span>
+              <strong id="sys-net-rx" class="metric-value font-mono" style="font-size: 1.15rem; color: var(--accent);">↓ 0 B/s</strong>
+            </div>
+            <span id="sys-net-tx" class="metric-sub-badge font-mono" style="color: var(--purple);">↑ 0 B/s</span>
+          </div>
+        </article>
+      </div>
+
+      <!-- Historical Charts Area -->
+      <div class="panel system-charts-panel">
+        <div class="chart-panel-header">
+          <div class="chart-panel-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            <h2>系统历史趋势图表</h2>
+            <span class="muted font-mono" id="chart-update-note">每 3 秒持久化心跳采样</span>
+          </div>
+          <div class="chart-range-buttons" id="chart-range-selector">
+            <button type="button" class="chart-range-btn" data-window="30m">30 分钟</button>
+            <button type="button" class="chart-range-btn active" data-window="1h">1 小时</button>
+            <button type="button" class="chart-range-btn" data-window="6h">6 小时</button>
+            <button type="button" class="chart-range-btn" data-window="24h">24 小时</button>
+            <button type="button" class="chart-range-btn" data-window="7d">7 天</button>
+          </div>
+        </div>
+
+        <div class="charts-grid">
+          <!-- CPU Trend Chart -->
+          <div class="chart-box">
+            <div class="chart-box-header">
+              <span class="chart-box-title">
+                <span class="legend-dot dot-blue"></span>
+                CPU 使用率趋势 (%)
+              </span>
+              <span id="chart-cpu-stat" class="chart-stat-tag font-mono">当前: —% | 峰值: —%</span>
+            </div>
+            <div id="chart-cpu-container" class="svg-chart-container"></div>
+          </div>
+
+          <!-- Memory Trend Chart -->
+          <div class="chart-box">
+            <div class="chart-box-header">
+              <span class="chart-box-title">
+                <span class="legend-dot dot-purple"></span>
+                内存使用率趋势 (%)
+              </span>
+              <span id="chart-mem-stat" class="chart-stat-tag font-mono">当前: —%</span>
+            </div>
+            <div id="chart-mem-container" class="svg-chart-container"></div>
+          </div>
+
+          <!-- Network Traffic Trend Chart -->
+          <div class="chart-box">
+            <div class="chart-box-header">
+              <span class="chart-box-title">
+                <span class="legend-dot dot-cyan"></span>
+                网络下行 / 上行速率 (KB/s)
+              </span>
+              <span id="chart-net-stat" class="chart-stat-tag font-mono">下行: — | 上行: —</span>
+            </div>
+            <div id="chart-net-container" class="svg-chart-container"></div>
+          </div>
         </div>
       </div>
     </section>
