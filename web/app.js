@@ -631,17 +631,22 @@ function renderSVGChart(containerId, options) {
   } else {
     series.forEach((s) => {
       const gradId = `${containerId}-${s.gradientId}`;
+      const filterId = `${containerId}-glow-${s.key}`;
       defsSVG += `
         <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="${s.color}" stop-opacity="${isLight ? '0.22' : '0.35'}" />
+          <stop offset="0%" stop-color="${s.color}" stop-opacity="${isLight ? '0.28' : '0.42'}" />
+          <stop offset="60%" stop-color="${s.color}" stop-opacity="${isLight ? '0.08' : '0.12'}" />
           <stop offset="100%" stop-color="${s.color}" stop-opacity="0.0" />
         </linearGradient>
+        <filter id="${filterId}" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="${s.color}" flood-opacity="${isLight ? '0.25' : '0.45'}" />
+        </filter>
       `;
 
       const pts = points.map((p) => ({ x: getX(p.timestamp_ms), y: getY(p[s.key]) }));
 
       if (pts.length === 1) {
-        pathsSVG += `<circle cx="${pts[0].x.toFixed(1)}" cy="${pts[0].y.toFixed(1)}" r="3.5" fill="${s.color}" />`;
+        pathsSVG += `<circle cx="${pts[0].x.toFixed(1)}" cy="${pts[0].y.toFixed(1)}" r="4" fill="${s.color}" filter="url(#${filterId})" />`;
       } else {
         // Area Path (anchored from first point's X to last point's X)
         let areaD = `M ${pts[0].x.toFixed(1)} ${(padTop + plotHeight).toFixed(1)}`;
@@ -658,7 +663,7 @@ function renderSVGChart(containerId, options) {
 
         pathsSVG += `
           <path d="${areaD}" fill="url(#${gradId})" />
-          <path d="${lineD}" fill="none" stroke="${s.color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+          <path d="${lineD}" fill="none" stroke="${s.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" filter="url(#${filterId})" />
         `;
       }
     });
@@ -672,7 +677,7 @@ function renderSVGChart(containerId, options) {
       ${pathsSVG}
       ${xLabelsSVG}
       <line id="${containerId}-crosshair" x1="0" y1="${padTop}" x2="0" y2="${padTop + plotHeight}" stroke="${crosshairStroke}" stroke-dasharray="3 3" style="display: none;" />
-      ${series.map(s => `<circle id="${containerId}-dot-${s.key}" r="4.5" fill="${s.color}" stroke="#ffffff" stroke-width="1.8" style="display: none;" />`).join("")}
+      ${series.map(s => `<circle id="${containerId}-dot-${s.key}" r="5" fill="${s.color}" stroke="${isLight ? '#ffffff' : '#090c15'}" stroke-width="2" style="display: none;" />`).join("")}
       <rect id="${containerId}-overlay" x="${padLeft}" y="${padTop}" width="${plotWidth}" height="${plotHeight}" fill="transparent" style="cursor: crosshair;" />
     </svg>
     <div id="${containerId}-tooltip" class="chart-tooltip-floating font-mono" style="display: none; opacity: 0;"></div>
