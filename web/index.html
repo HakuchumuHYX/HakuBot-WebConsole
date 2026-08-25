@@ -3,8 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>HakuBot WebConsole</title>
+  <meta name="color-scheme" content="dark light">
+  <title>系统与事件响应控制台</title>
+  <script>
+    (function() {
+      const saved = localStorage.getItem("webconsole_theme");
+      const theme = saved || "dark";
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Outfit:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -27,15 +34,33 @@
         </svg>
       </div>
       <div>
-        <p class="eyebrow">HAKUBOT / NONEBOT</p>
-        <h1>事件响应控制台</h1>
+        <p class="eyebrow">SYSTEM CONSOLE</p>
+        <h1>系统与事件响应控制台</h1>
       </div>
     </div>
     <div class="status-area">
-      <span id="bot-status" class="status offline">
-        <span class="status-dot"></span>
-        <span class="status-text">离线</span>
-      </span>
+      <div class="status-area-top">
+        <button id="theme-toggle" class="theme-toggle-btn" type="button" aria-label="切换日间/夜间模式" title="切换日间/夜间模式">
+          <svg class="theme-icon sun-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="theme-icon moon-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+        <span id="bot-status" class="status offline">
+          <span class="status-dot"></span>
+          <span class="status-text">离线</span>
+        </span>
+      </div>
       <span id="current-time" class="muted font-mono">当前时间 · GMT+8</span>
     </div>
   </header>
@@ -502,7 +527,7 @@
     <div class="dialog-container">
       <form method="dialog" class="dialog-head">
         <div>
-          <p class="eyebrow">RESPONSE DETAIL</p>
+          <p id="detail-eyebrow" class="eyebrow">RESPONSE DETAIL</p>
           <h2 id="detail-title">响应详情</h2>
         </div>
         <button class="icon-button" aria-label="关闭" type="submit">
@@ -511,16 +536,17 @@
       </form>
       <div class="dialog-body">
         <div id="detail-meta" class="detail-meta"></div>
-        <div id="raw-actions" class="raw-actions"></div>
-        <div class="raw-content-wrapper">
+        <div id="detail-sections" class="detail-sections"></div>
+        <div id="raw-actions" class="raw-actions hidden"></div>
+        <div id="raw-content-wrapper" class="raw-content-wrapper hidden">
           <div class="raw-content-toolbar">
-            <span class="toolbar-title font-mono">Payload & Logs</span>
+            <span id="raw-toolbar-title" class="toolbar-title font-mono">Payload & Logs</span>
             <button id="copy-raw-btn" class="copy-btn hidden" type="button">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
               复制数据
             </button>
           </div>
-          <pre id="raw-content" class="raw-content font-mono">选择上方内容查看完整原始数据。</pre>
+          <pre id="raw-content" class="raw-content font-mono"></pre>
         </div>
       </div>
     </div>

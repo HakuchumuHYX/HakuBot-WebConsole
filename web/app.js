@@ -107,7 +107,9 @@ function filterParams(form, includeCursor = false) {
 function textCell(value, className = "") {
   const cell = document.createElement("td");
   if (className) cell.className = className;
-  cell.textContent = value || "—";
+  const str = value || "—";
+  cell.textContent = str;
+  cell.title = str;
   return cell;
 }
 
@@ -159,18 +161,55 @@ async function loadEvents({ append = false } = {}) {
   }
 }
 
+function createDetailCard(title, content, options = {}) {
+  const card = document.createElement("div");
+  card.className = `detail-card ${options.className || ""}`;
+
+  const header = document.createElement("div");
+  header.className = "detail-card-header";
+
+  const titleEl = document.createElement("span");
+  titleEl.className = "detail-card-title";
+  titleEl.textContent = title;
+  header.append(titleEl);
+
+  if (options.copyable !== false && content && content !== "—") {
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "copy-btn";
+    copyBtn.type = "button";
+    copyBtn.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+      复制
+    `;
+    copyBtn.addEventListener("click", () => {
+      navigator.clipboard.writeText(content).then(() => toast("已复制到剪贴板")).catch(() => toast("复制失败"));
+    });
+    header.append(copyBtn);
+  }
+
+  const body = document.createElement("div");
+  body.className = `detail-card-body ${options.mono ? "font-mono" : ""}`;
+  body.textContent = content || "—";
+
+  card.append(header, body);
+  return card;
+}
+
 async function showEventDetail(id) {
   const detail = await (await api(`/api/events/${id}`)).json();
+  if ($("#detail-eyebrow")) $("#detail-eyebrow").textContent = "RESPONSE DETAIL";
   $("#detail-title").textContent = `${detail.plugin_name || detail.module_name || "未知插件"} · ${detail.status === "success" ? "成功" : "失败"}`;
+  
+  // 1. Meta Grid
   const fields = {
     "开始时间（GMT+8）": detail.time_display,
     "结束时间（GMT+8）": detail.finished_display,
     "模块": detail.module_name,
     "Matcher": `${detail.matcher_type || "—"}${detail.matcher_lineno ? `:${detail.matcher_lineno}` : ""}`,
     "群 / 用户": `${detail.group_id || "私聊"} / ${detail.user_id || "—"}`,
+    "耗时": detail.duration_ms != null ? `${detail.duration_ms} ms` : "—",
+    "发送状态": `${detail.send_success_count}/${detail.send_count} 成功${detail.send_failure_count ? `，${detail.send_failure_count} 失败` : ""}`,
     "消息 ID": detail.source_message_id,
-    "发送": `${detail.send_success_count}/${detail.send_count} 成功，${detail.send_failure_count} 失败`,
-    "错误": [detail.error_type, detail.error_message].filter(Boolean).join(": ") || "—",
     "run_id": detail.run_id,
   };
   const meta = $("#detail-meta");
@@ -182,14 +221,32 @@ async function showEventDetail(id) {
     box.append(title, document.createTextNode(value || "—"));
     meta.append(box);
   }
-  const actions = $("#raw-actions");
-  actions.replaceChildren();
-  $("#raw-content").textContent = detail.has_full_diagnostics
-    ? "选择上方内容查看完整原始数据。"
-    : "该普通成功响应仅保存摘要，没有完整诊断数据。";
-  if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
-  
-  if (detail.has_full_diagnostics) {
+
+  // 2. Sections: Full Input & Output Cards
+  const sections = $("#detail-sections");
+  if (sections) {
+    sections.replaceChildren();
+    sections.append(createDetailCard("📥 用户输入内容 (Request)", detail.request_summary || "（无输入内容）"));
+    sections.append(createDetailCard("📤 机器人响应内容 (Response)", detail.response_summary || "（无响应内容）"));
+
+    if (detail.status === "failure" || detail.error_type || detail.error_message) {
+      const errorText = [detail.error_type, detail.error_message].filter(Boolean).join(": ") || "未知错误";
+      sections.append(createDetailCard("⚠️ 错误详情 (Error Detail)", errorText, { className: "error-card", mono: true }));
+    }
+  }
+
+  // 3. Raw Diagnostics Container (only show when has_full_diagnostics is true!)
+  const rawActions = $("#raw-actions");
+  const rawWrapper = $("#raw-content-wrapper");
+  if (rawActions) rawActions.replaceChildren();
+
+  if (detail.has_full_diagnostics && rawActions && rawWrapper) {
+    rawActions.classList.remove("hidden");
+    rawWrapper.classList.remove("hidden");
+    if ($("#raw-toolbar-title")) $("#raw-toolbar-title").textContent = "Payload & Logs";
+    $("#raw-content").textContent = "点击上方按钮查看完整原始数据。";
+    if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
+
     for (const [part, label] of [["input", "完整输入"], ["output", "完整输出"], ["logs", "完整日志"]]) {
       const view = document.createElement("button");
       view.textContent = `查看${label}`;
@@ -198,9 +255,13 @@ async function showEventDetail(id) {
       download.href = `/api/events/${id}/raw/${part}`;
       download.textContent = `下载${label}`;
       download.className = "button-link";
-      actions.append(view, download);
+      rawActions.append(view, download);
     }
+  } else if (rawActions && rawWrapper) {
+    rawActions.classList.add("hidden");
+    rawWrapper.classList.add("hidden");
   }
+
   $("#detail-dialog").showModal();
 }
 
@@ -268,10 +329,39 @@ async function loadDiagnostics({ append = false } = {}) {
       textCell(item.message_summary, "summary"),
     );
     row.addEventListener("click", async () => {
+      if ($("#detail-eyebrow")) $("#detail-eyebrow").textContent = "DIAGNOSTIC LOG";
       $("#detail-title").textContent = `${item.level} · ${item.plugin_name || item.module_name || "系统"}`;
-      $("#detail-meta").replaceChildren();
-      $("#raw-actions").replaceChildren();
-      if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
+      
+      const meta = $("#detail-meta");
+      meta.replaceChildren();
+      const fields = {
+        "记录时间（GMT+8）": item.time_display,
+        "日志级别": item.level,
+        "插件 / 模块": item.plugin_name || item.module_name || "—",
+        "Logger": item.logger_name || "—",
+      };
+      for (const [label, value] of Object.entries(fields)) {
+        const box = document.createElement("div");
+        const title = document.createElement("span");
+        title.textContent = label;
+        box.append(title, document.createTextNode(value || "—"));
+        meta.append(box);
+      }
+
+      const sections = $("#detail-sections");
+      if (sections) sections.replaceChildren();
+
+      const rawActions = $("#raw-actions");
+      const rawWrapper = $("#raw-content-wrapper");
+      if (rawActions) {
+        rawActions.replaceChildren();
+        rawActions.classList.add("hidden");
+      }
+      if (rawWrapper) {
+        rawWrapper.classList.remove("hidden");
+      }
+      if ($("#raw-toolbar-title")) $("#raw-toolbar-title").textContent = "完整诊断记录 (Traceback & Logs)";
+
       $("#detail-dialog").showModal();
       await loadRaw(`/api/diagnostics/${item.id}`);
     });
@@ -474,6 +564,13 @@ function renderSVGChart(containerId, options) {
     return padTop + plotHeight - ((clamped - yMin) / yRange) * plotHeight;
   };
 
+  const isLight = document.documentElement.getAttribute("data-theme") === "light";
+  const gridStroke = isLight ? "rgba(0, 0, 0, 0.07)" : "rgba(255, 255, 255, 0.06)";
+  const baselineStroke = isLight ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.18)";
+  const tickStroke = isLight ? "rgba(0, 0, 0, 0.25)" : "rgba(255, 255, 255, 0.3)";
+  const textFill = isLight ? "#64748b" : "#8493a8";
+  const crosshairStroke = isLight ? "rgba(0, 0, 0, 0.35)" : "rgba(255, 255, 255, 0.4)";
+
   // Build Horizontal Grid Lines & Y Labels
   let gridSVG = "";
   for (let i = 0; i <= gridSteps; i++) {
@@ -481,18 +578,18 @@ function renderSVGChart(containerId, options) {
     const yPos = getY(val);
     if (i > 0 && i < gridSteps) {
       gridSVG += `
-        <line x1="${padLeft}" y1="${yPos}" x2="${svgWidth - padRight}" y2="${yPos}" stroke="rgba(255,255,255,0.06)" stroke-dasharray="4 4" />
+        <line x1="${padLeft}" y1="${yPos}" x2="${svgWidth - padRight}" y2="${yPos}" stroke="${gridStroke}" stroke-dasharray="4 4" />
       `;
     }
     gridSVG += `
-      <text x="${padLeft - 8}" y="${yPos + 3.5}" fill="#8493a8" font-size="11" text-anchor="end" font-family="'JetBrains Mono', monospace">${formatY(val)}</text>
+      <text x="${padLeft - 8}" y="${yPos + 3.5}" fill="${textFill}" font-size="11" text-anchor="end" font-family="'JetBrains Mono', monospace">${formatY(val)}</text>
     `;
   }
 
   // Coordinate Frame Baselines (Left Y-axis line and Bottom X-axis line)
   const baselineFrameSVG = `
-    <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotHeight}" stroke="rgba(255,255,255,0.18)" stroke-width="1.2" />
-    <line x1="${padLeft}" y1="${padTop + plotHeight}" x2="${svgWidth - padRight}" y2="${padTop + plotHeight}" stroke="rgba(255,255,255,0.18)" stroke-width="1.2" />
+    <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotHeight}" stroke="${baselineStroke}" stroke-width="1.2" />
+    <line x1="${padLeft}" y1="${padTop + plotHeight}" x2="${svgWidth - padRight}" y2="${padTop + plotHeight}" stroke="${baselineStroke}" stroke-width="1.2" />
   `;
 
   // Fixed X Time Ticks & Time Labels based on the actual window [fromMs, toMs]
@@ -520,8 +617,8 @@ function renderSVGChart(containerId, options) {
     }
 
     xLabelsSVG += `
-      <line x1="${xPos}" y1="${padTop + plotHeight}" x2="${xPos}" y2="${padTop + plotHeight + 5}" stroke="rgba(255,255,255,0.3)" stroke-width="1.2" />
-      <text x="${xPos}" y="${padTop + plotHeight + 19}" fill="#8493a8" font-size="11" text-anchor="${anchor}" font-family="'JetBrains Mono', monospace">${timeText}</text>
+      <line x1="${xPos}" y1="${padTop + plotHeight}" x2="${xPos}" y2="${padTop + plotHeight + 5}" stroke="${tickStroke}" stroke-width="1.2" />
+      <text x="${xPos}" y="${padTop + plotHeight + 19}" fill="${textFill}" font-size="11" text-anchor="${anchor}" font-family="'JetBrains Mono', monospace">${timeText}</text>
     `;
   }
 
@@ -530,13 +627,13 @@ function renderSVGChart(containerId, options) {
   let pathsSVG = "";
 
   if (points.length === 0) {
-    pathsSVG = `<text x="${padLeft + plotWidth / 2}" y="${padTop + plotHeight / 2}" fill="#8493a8" font-size="12" text-anchor="middle" font-family="'JetBrains Mono', monospace">暂无时序数据</text>`;
+    pathsSVG = `<text x="${padLeft + plotWidth / 2}" y="${padTop + plotHeight / 2}" fill="${textFill}" font-size="12" text-anchor="middle" font-family="'JetBrains Mono', monospace">暂无时序数据</text>`;
   } else {
     series.forEach((s) => {
       const gradId = `${containerId}-${s.gradientId}`;
       defsSVG += `
         <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="${s.color}" stop-opacity="0.35" />
+          <stop offset="0%" stop-color="${s.color}" stop-opacity="${isLight ? '0.22' : '0.35'}" />
           <stop offset="100%" stop-color="${s.color}" stop-opacity="0.0" />
         </linearGradient>
       `;
@@ -574,7 +671,7 @@ function renderSVGChart(containerId, options) {
       ${baselineFrameSVG}
       ${pathsSVG}
       ${xLabelsSVG}
-      <line id="${containerId}-crosshair" x1="0" y1="${padTop}" x2="0" y2="${padTop + plotHeight}" stroke="rgba(255,255,255,0.4)" stroke-dasharray="3 3" style="display: none;" />
+      <line id="${containerId}-crosshair" x1="0" y1="${padTop}" x2="0" y2="${padTop + plotHeight}" stroke="${crosshairStroke}" stroke-dasharray="3 3" style="display: none;" />
       ${series.map(s => `<circle id="${containerId}-dot-${s.key}" r="4.5" fill="${s.color}" stroke="#ffffff" stroke-width="1.8" style="display: none;" />`).join("")}
       <rect id="${containerId}-overlay" x="${padLeft}" y="${padTop}" width="${plotWidth}" height="${plotHeight}" fill="transparent" style="cursor: crosshair;" />
     </svg>
@@ -837,6 +934,31 @@ function bindEvents() {
       $("#toggle-event-filters").textContent = isHidden ? "收起筛选" : "展开筛选";
     });
   }
+  if ($("#theme-toggle")) {
+    $("#theme-toggle").addEventListener("click", toggleTheme);
+  }
+}
+
+function getTheme() {
+  return document.documentElement.getAttribute("data-theme") || "dark";
+}
+
+function setTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem("webconsole_theme", theme);
+  const metaColorScheme = $('meta[name="color-scheme"]');
+  if (metaColorScheme) {
+    metaColorScheme.setAttribute("content", theme === "light" ? "light dark" : "dark light");
+  }
+  if ($(".tab.active")?.dataset.view === "system" && state.systemHistoryData) {
+    loadSystemHistory(state.systemWindow).catch(() => {});
+  }
+}
+
+function toggleTheme() {
+  const current = getTheme();
+  const next = current === "light" ? "dark" : "light";
+  setTheme(next);
 }
 
 async function initialize() {
