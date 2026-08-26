@@ -5,6 +5,10 @@
 #     '$remote_addr - $remote_user [$time_local] '
 #     '"$request_method $uri $server_protocol" $status $body_bytes_sent '
 #     '"$http_referer" "$http_user_agent"';
+# map $http_upgrade $webconsole_connection_upgrade {
+#     default upgrade;
+#     ''      close;
+# }
 
 server {
     listen 54321 ssl;
@@ -38,6 +42,57 @@ server {
 
     location = /healthz { return 404; }
     location = /readyz  { return 404; }
+
+    location = /hermes {
+        return 307 /hermes/;
+    }
+
+    # Compatibility aliases for the dashboard's declared top-level pages.
+    # Keep /, /api/*, and other WebConsole routes outside this allowlist.
+    location ~ ^/(chat|sessions|files|analytics|models|logs|cron|skills|plugins|mcp|channels|webhooks|pairing|profiles|config|env|system|docs|login)$ {
+        return 307 /hermes$request_uri;
+    }
+
+    # Hermes is a privileged local agent dashboard. It has its own password
+    # gate in addition to this server's WebConsole Basic Auth.
+    location ^~ /hermes/ {
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $webconsole_connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        client_max_body_size 32m;
+        limit_req zone=webconsole burst=120 nodelay;
+    }
+
+    # Hermes' built-in login page currently emits root-relative auth and font
+    # URLs even when the dashboard is served below X-Forwarded-Prefix.
+    location ^~ /auth/ {
+        proxy_pass http://127.0.0.1:54322/hermes/auth/;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_buffering off;
+        proxy_read_timeout 60s;
+        limit_req zone=webconsole burst=120 nodelay;
+    }
+
+    # Some Hermes dynamic imports are root-relative even under a prefix.
+    # These aliases keep them same-origin without taking over /api/*.
+    location ~ ^/(assets|ds-assets|fonts|fonts-terminal|dashboard-plugins)/(.*)$ {
+        rewrite ^/(.*)$ /hermes/$1 break;
+        proxy_pass http://127.0.0.1:54322;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+        limit_req zone=webconsole burst=120 nodelay;
+    }
+
+    location = /favicon.ico {
+        proxy_pass http://127.0.0.1:54322/hermes/favicon.ico;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+        limit_req zone=webconsole burst=120 nodelay;
+    }
 
     location = /api/storage/cleanup/preview {
         limit_except POST { deny all; }

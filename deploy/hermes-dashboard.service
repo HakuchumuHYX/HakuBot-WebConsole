@@ -1,0 +1,36 @@
+[Unit]
+Description=Hermes Dashboard for HakuBot WebConsole
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root
+Environment=HERMES_HOME=/root/.hermes
+EnvironmentFile=/etc/hermes-dashboard.env
+ExecStart=/usr/local/bin/hermes dashboard --host 127.0.0.1 --port 9119 --no-open --skip-build
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=default
+ProcSubset=all
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

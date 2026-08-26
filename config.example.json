@@ -3,6 +3,7 @@
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
   "spool_path": "/var/lib/hakubot-webconsole/spool",
   "public_origin": "https://203.0.113.10:54321",
+  "hermes_dashboard_url": "http://127.0.0.1:9119",
   "retention_days": 90,
   "token_secret": "CHANGE_ME_NOT_VALID_BASE64!"
 }

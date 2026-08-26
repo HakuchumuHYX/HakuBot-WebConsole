@@ -856,8 +856,8 @@ function startPeriodicRefresh() {
 }
 
 function bindEvents() {
-  $$(".tab").forEach(button => button.addEventListener("click", () => {
-    $$(".tab").forEach(item => item.classList.toggle("active", item === button));
+  $$(".tab[data-view]").forEach(button => button.addEventListener("click", () => {
+    $$(".tab[data-view]").forEach(item => item.classList.toggle("active", item === button));
     $$(".view").forEach(view => view.classList.toggle("active", view.id === `view-${button.dataset.view}`));
     if (button.dataset.view === "events") loadEvents().catch(error => toast(error.message));
     if (button.dataset.view === "diagnostics") loadDiagnostics().catch(error => toast(error.message));

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -37,17 +38,19 @@ type Server struct {
 	static        http.Handler
 	sysCollector  *sysmonitor.Collector
 	sysRepo       *sysmonitor.Repository
+	hermes        http.Handler
 	mux           *http.ServeMux
 }
 
 type Options struct {
-	Storage       *storage.Manager
-	CSRF          *csrf.Protector
-	Confirmations *csrf.ConfirmationStore
-	Stream        http.Handler
-	Static        http.Handler
-	SysCollector  *sysmonitor.Collector
-	SysRepo       *sysmonitor.Repository
+	Storage            *storage.Manager
+	CSRF               *csrf.Protector
+	Confirmations      *csrf.ConfirmationStore
+	Stream             http.Handler
+	Static             http.Handler
+	SysCollector       *sysmonitor.Collector
+	SysRepo            *sysmonitor.Repository
+	HermesDashboardURL *url.URL
 }
 
 func New(
@@ -68,6 +71,9 @@ func New(
 		sysCollector:  options.SysCollector,
 		sysRepo:       options.SysRepo,
 		mux:           http.NewServeMux(),
+	}
+	if options.HermesDashboardURL != nil {
+		server.hermes = newHermesProxy(options.HermesDashboardURL)
 	}
 	server.routes()
 	return server
@@ -95,6 +101,24 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/storage", s.storageStats)
 	s.mux.HandleFunc("GET /api/system/status", s.systemStatus)
 	s.mux.HandleFunc("GET /api/system/history", s.systemHistory)
+	s.mux.HandleFunc("GET /hermes", func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		http.Redirect(writer, request, "/hermes/", http.StatusTemporaryRedirect)
+	})
+	if s.hermes != nil {
+		for _, method := range []string{
+			http.MethodGet,
+			http.MethodPost,
+			http.MethodPut,
+			http.MethodPatch,
+			http.MethodDelete,
+			http.MethodOptions,
+		} {
+			s.mux.Handle(method+" /hermes/", s.hermes)
+		}
+	}
 	s.mux.HandleFunc(
 		"POST /api/storage/cleanup/preview",
 		s.cleanupPreview,
@@ -111,6 +135,10 @@ func (s *Server) routes() {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/hermes/") {
+			next.ServeHTTP(writer, request)
+			return
+		}
 		header := writer.Header()
 		header.Set("Cache-Control", "no-store")
 		header.Set("Pragma", "no-cache")
