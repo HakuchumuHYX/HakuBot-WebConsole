@@ -55,6 +55,20 @@ server {
 
     # Hermes is a privileged local agent dashboard. It has its own password
     # gate in addition to this server's WebConsole Basic Auth.
+    location = /hermes/favicon.ico {
+        proxy_pass http://127.0.0.1:54322/favicon.ico;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+        limit_req zone=webconsole burst=120 nodelay;
+    }
+
+    location = /hermes/favicon.svg {
+        proxy_pass http://127.0.0.1:54322/favicon.svg;
+        include __WEBCONSOLE_PROXY_INCLUDE__;
+        proxy_read_timeout 60s;
+        limit_req zone=webconsole burst=120 nodelay;
+    }
+
     location ^~ /hermes/ {
         proxy_pass http://127.0.0.1:54322;
         include __WEBCONSOLE_PROXY_INCLUDE__;
@@ -88,7 +102,7 @@ server {
     }
 
     location = /favicon.ico {
-        proxy_pass http://127.0.0.1:54322/hermes/favicon.ico;
+        proxy_pass http://127.0.0.1:54322/favicon.ico;
         include __WEBCONSOLE_PROXY_INCLUDE__;
         proxy_read_timeout 60s;
         limit_req zone=webconsole burst=120 nodelay;
