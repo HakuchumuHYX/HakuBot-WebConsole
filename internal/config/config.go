@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,23 +15,21 @@ import (
 )
 
 type Config struct {
-	ListenAddress      string
-	DatabasePath       string
-	SpoolPath          string
-	PublicOrigin       string
-	RetentionDays      int
-	TokenSecret        []byte
-	HermesDashboardURL *url.URL
+	ListenAddress string
+	DatabasePath  string
+	SpoolPath     string
+	PublicOrigin  string
+	RetentionDays int
+	TokenSecret   []byte
 }
 
 type fileConfig struct {
-	ListenAddress      string `json:"listen"`
-	DatabasePath       string `json:"database_path"`
-	SpoolPath          string `json:"spool_path"`
-	PublicOrigin       string `json:"public_origin"`
-	RetentionDays      *int   `json:"retention_days"`
-	TokenSecret        string `json:"token_secret"`
-	HermesDashboardURL string `json:"hermes_dashboard_url"`
+	ListenAddress string `json:"listen"`
+	DatabasePath  string `json:"database_path"`
+	SpoolPath     string `json:"spool_path"`
+	PublicOrigin  string `json:"public_origin"`
+	RetentionDays *int   `json:"retention_days"`
+	TokenSecret   string `json:"token_secret"`
 }
 
 func Load() (Config, error) {
@@ -65,19 +62,6 @@ func Load() (Config, error) {
 			"/",
 		),
 	}
-	hermesDashboardURL, err := parseLoopbackHTTPURL(
-		"WEBCONSOLE_HERMES_DASHBOARD_URL",
-		valueWithOverride(
-			"WEBCONSOLE_HERMES_DASHBOARD_URL",
-			fileCfg.HermesDashboardURL,
-			"http://127.0.0.1:9119",
-		),
-	)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.HermesDashboardURL = hermesDashboardURL
-
 	if err := validateLoopbackAddress(cfg.ListenAddress); err != nil {
 		return Config{}, err
 	}
@@ -113,37 +97,6 @@ func Load() (Config, error) {
 	}
 	cfg.TokenSecret = secret
 	return cfg, nil
-}
-
-func parseLoopbackHTTPURL(name, raw string) (*url.URL, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid %s: %w", name, err)
-	}
-	if parsed.Scheme != "http" || parsed.User != nil ||
-		parsed.Host == "" || parsed.Port() == "" ||
-		(parsed.Path != "" && parsed.Path != "/") ||
-		parsed.RawPath != "" || parsed.RawQuery != "" ||
-		parsed.Fragment != "" {
-		return nil, fmt.Errorf(
-			"%s must be an http URL with a literal loopback host and port",
-			name,
-		)
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	if err != nil || port < 1 || port > 65535 {
-		return nil, fmt.Errorf("%s must use a valid port", name)
-	}
-	host := parsed.Hostname()
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return nil, fmt.Errorf(
-			"%s must use a literal loopback IP address",
-			name,
-		)
-	}
-	parsed.Path = ""
-	return parsed, nil
 }
 
 func loadFileConfig() (fileConfig, error) {

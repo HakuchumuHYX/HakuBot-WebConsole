@@ -98,7 +98,6 @@ cp config.example.json config.json
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
   "spool_path": "/var/lib/hakubot-webconsole/spool",
   "public_origin": "https://203.0.113.10:54321",
-  "hermes_dashboard_url": "http://127.0.0.1:9119",
   "retention_days": 90,
   "token_secret": "CHANGE_ME_NOT_VALID_BASE64!"
 }
@@ -112,7 +111,6 @@ cp config.example.json config.json
 | `database_path` | SQLite 文件的绝对路径 |
 | `spool_path` | 高优先级完整诊断 spool 的绝对路径 |
 | `public_origin` | 浏览器实际访问的 HTTPS Origin，包含非标准端口 |
-| `hermes_dashboard_url` | 本机 Hermes Dashboard 上游地址；必须是带端口的字面量回环 HTTP URL |
 | `retention_days` | 自动保留天数；`0` 表示关闭自动清理 |
 | `token_secret` | 游标、CSRF 和清理确认令牌使用的随机密钥 |
 
@@ -133,7 +131,6 @@ WEBCONSOLE_LISTEN
 WEBCONSOLE_DB_PATH
 WEBCONSOLE_SPOOL_PATH
 WEBCONSOLE_PUBLIC_ORIGIN
-WEBCONSOLE_HERMES_DASHBOARD_URL
 WEBCONSOLE_RETENTION_DAYS
 WEBCONSOLE_TOKEN_SECRET
 ```
@@ -179,35 +176,7 @@ curl http://127.0.0.1:54322/readyz
 
 `/readyz` 成功后再启动 HakuBot。bridge 会探测 schema 和目录权限，并开始异步采集。
 
-## 6. Hermes Agent Dashboard
-
-WebConsole 顶部的 “Hermes Agent” 入口会打开同源的 `/hermes/chat`。
-WebConsole 只反代本机 Dashboard，不读取或保存 Hermes 的模型配置、API key 或
-会话；这些仍归 root 的 `/root/.hermes` 管理。
-
-先交互创建 Hermes 的独立登录凭据。它会提示输入用户名和密码，生成 scrypt 哈希
-与会话签名 secret，并只写入 root 可读的 `/etc/hermes-dashboard.env`；明文密码和
-该环境文件都不会进入 Git：
-
-```bash
-sudo deploy/setup-hermes-dashboard-auth.sh \
-  'https://203.0.113.10:54321/hermes'
-```
-
-安装并启动 Dashboard 服务：
-
-```bash
-sudo install -m 0644 deploy/hermes-dashboard.service \
-  /etc/systemd/system/hermes-dashboard.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now hermes-dashboard.service
-```
-
-该服务只监听 `127.0.0.1:9119`、以 root 运行当前 Hermes 实例，并自动重启。
-首次启动可能构建 Hermes Dashboard 前端。访问 `/hermes/` 时会先经过 WebConsole
-的 Nginx Basic Auth，再经过 Hermes 的独立登录页；两套凭据应分开保管。
-
-## 7. WebConsole systemd
+## 6. WebConsole systemd
 
 复制 `deploy/webconsole.service`，替换：
 
@@ -233,7 +202,7 @@ sudo systemctl enable --now webconsole.service
 - `ProtectSystem=strict`
 - 只允许写共享数据目录
 
-## 8. Nginx、HTTPS 和 Basic Auth
+## 7. Nginx、HTTPS 和 Basic Auth
 
 Go 后端只能监听 `127.0.0.1:54322`，公网端口由 Nginx 提供。
 
@@ -296,7 +265,7 @@ NGINX_CONFIG
 只有在 `nginx -t` 成功、HTTPS 和 Basic Auth 已验证后，才开放公网 TCP 54321。
 不要把 `127.0.0.1:54322` 暴露到公网。
 
-## 9. 数据与隐私
+## 8. 数据与隐私
 
 数据库可能包含完整群消息、媒体 URL、API 输入输出和 traceback。以下内容绝不能
 提交到 Git：
@@ -312,7 +281,6 @@ bin/
 *.pem
 *.key
 *.htpasswd
-/etc/hermes-dashboard.env
 ```
 
 项目 `.gitignore` 还会排除本地测试、私有实施文档和渲染后的部署文件。
@@ -330,7 +298,7 @@ git check-ignore -v data/webconsole.db
 确认暂存内容中没有真实公网 IP、Bot QQ、密码、Token、数据库或服务器配置快照后，
 再创建提交。
 
-## 10. 迁移服务器
+## 9. 迁移服务器
 
 迁移时不需要回填旧日志。标准流程：
 
@@ -341,9 +309,8 @@ git check-ignore -v data/webconsole.db
 5. 保证两边 SQLite 和 spool 路径一致。
 6. 启动 WebConsole，等待 `/readyz`。
 7. 启动 HakuBot。
-8. 初始化 Hermes Dashboard 凭据并安装其 systemd 服务。
-9. 安装 WebConsole systemd、Nginx、HTTPS 和 Basic Auth。
-10. 验证公网 54321 可达、54322 不可达、Bot 在线状态和实际事件响应。
+8. 安装 WebConsole systemd、Nginx、HTTPS 和 Basic Auth。
+9. 验证公网 54321 可达、54322 不可达、Bot 在线状态和实际事件响应。
 
 数据库无需从旧服务器复制时，新实例会从空 schema 开始，不读取或回填
 `output.log`。

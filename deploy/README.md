@@ -3,10 +3,6 @@
 完整的双仓库配置、构建、systemd、Nginx、HTTPS、Basic Auth 和迁移说明见仓库
 根目录的 `README.md`。
 
-`setup-hermes-dashboard-auth.sh` 是唯一会处理 Hermes Dashboard 密码的部署辅助
-脚本：它交互读取密码并仅将哈希写入 `/etc/hermes-dashboard.env`。该文件不能复制到
-本目录、不能提交 Git，也不能输出到部署日志。
-
 本目录下的模板包含占位符，不能未经替换直接安装：
 
 ```text
