@@ -26,8 +26,7 @@ HakuBot repository
 
 webconsole repository
 ├── cmd/                         # Go 入口
-├── internal/                    # API、查询、存储和安全逻辑
-├── migrations/                  # SQLite schema
+├── internal/                    # API、查询、存储、系统监控和 SQLite schema
 ├── web/                         # 内嵌网页
 └── deploy/                      # 通用部署模板
 ```
@@ -35,9 +34,11 @@ webconsole repository
 两个进程不通过 HTTP 逐事件推送。它们通过同一个 SQLite 文件和 spool 目录协作，
 因此两边配置的 `database_path` 和 `spool_path` 必须完全一致。
 
-WebConsole 负责初始化和升级数据库 schema；bridge 不自行创建 schema。首次部署时
-建议先启动 WebConsole，再启动 HakuBot。如果顺序相反，bridge 会在启动时 warning
-一次，并在存储可用后自动恢复采集。
+WebConsole 每次启动时幂等执行 `internal/database/schema.sql`（`CREATE ... IF NOT EXISTS`），
+bridge 不自行建表，只检查它要写入的表是否存在。首次部署时建议先启动 WebConsole，再启动
+HakuBot。如果顺序相反，bridge 会在启动时 warning 一次，并在存储可用后自动恢复采集。
+
+`IF NOT EXISTS` 不会修改已存在的表。调整已有表结构时，需要单独写一次性 SQL 脚本手动执行。
 
 ## 要求
 
@@ -98,44 +99,21 @@ cp config.example.json config.json
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
   "spool_path": "/var/lib/hakubot-webconsole/spool",
   "public_origin": "https://203.0.113.10:54321",
-  "retention_days": 90,
-  "token_secret": "CHANGE_ME_NOT_VALID_BASE64!"
+  "retention_days": 90
 }
 ```
 
-字段说明：
+字段说明（全部必填）：
 
 | 字段 | 说明 |
 | --- | --- |
 | `listen` | Go 后端监听地址，必须是字面量回环 IP |
 | `database_path` | SQLite 文件的绝对路径 |
 | `spool_path` | 高优先级完整诊断 spool 的绝对路径 |
-| `public_origin` | 浏览器实际访问的 HTTPS Origin，包含非标准端口 |
+| `public_origin` | 浏览器实际访问的 HTTPS Origin，包含非标准端口；清理接口只接受这个 Origin 发起的请求 |
 | `retention_days` | 自动保留天数；`0` 表示关闭自动清理 |
-| `token_secret` | 游标、CSRF 和清理确认令牌使用的随机密钥 |
 
-生成随机密钥：
-
-```bash
-openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
-```
-
-`token_secret` 至少需要 32 字节强度的 raw URL-safe Base64。生产环境必须持久保存；
-不要依赖程序每次启动时临时生成。
-
-默认读取当前工作目录的 `config.json`。可通过以下环境变量覆盖任意配置：
-
-```text
-WEBCONSOLE_CONFIG
-WEBCONSOLE_LISTEN
-WEBCONSOLE_DB_PATH
-WEBCONSOLE_SPOOL_PATH
-WEBCONSOLE_PUBLIC_ORIGIN
-WEBCONSOLE_RETENTION_DAYS
-WEBCONSOLE_TOKEN_SECRET
-```
-
-优先级为：环境变量、`config.json`、非敏感默认值。
+程序只读取当前工作目录下的 `config.json`，systemd 模板通过 `WorkingDirectory` 指定工作目录。
 
 ## 4. 配置 HakuBot bridge
 
@@ -161,7 +139,7 @@ cp config.example.json config.json
 
 ## 5. 首次启动
 
-先运行 WebConsole，让 migration 创建数据库：
+先运行 WebConsole，让它创建数据库和表：
 
 ```bash
 ./bin/webconsole
@@ -235,10 +213,6 @@ log_format webconsole
     '$remote_addr - $remote_user [$time_local] '
     '"$request_method $uri $server_protocol" $status $body_bytes_sent '
     '"$http_referer" "$http_user_agent"';
-map $http_upgrade $webconsole_connection_upgrade {
-    default upgrade;
-    ''      close;
-}
 ```
 
 access log 使用 `$uri`，不会记录查询字符串。
@@ -283,7 +257,7 @@ bin/
 *.htpasswd
 ```
 
-项目 `.gitignore` 还会排除本地测试、私有实施文档和渲染后的部署文件。
+项目 `.gitignore` 还会排除私有实施文档和渲染后的部署文件。
 
 首次提交前检查：
 

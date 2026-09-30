@@ -13,22 +13,22 @@ import (
 )
 
 type Repository struct {
-	db     *sql.DB
-	cursor CursorCodec
+	db *sql.DB
 }
 
-func NewRepository(db *sql.DB, cursor CursorCodec) *Repository {
-	return &Repository{db: db, cursor: cursor}
+func NewRepository(db *sql.DB) *Repository {
+	return &Repository{db: db}
 }
 
+// Filters arrive validated from the HTTP layer. CursorID == 0 means no cursor.
 type EventFilters struct {
 	Status   string
 	FromMS   *int64
 	ToMS     *int64
 	GroupID  string
 	Plugin   string
-	CursorMS *int64
-	CursorID *int64
+	CursorMS int64
+	CursorID int64
 	Limit    int
 }
 
@@ -62,16 +62,7 @@ func (r *Repository) ListEvents(
 	ctx context.Context,
 	filters EventFilters,
 ) (EventPage, error) {
-	if filters.Limit <= 0 {
-		filters.Limit = 50
-	}
-	if filters.Limit > 200 {
-		filters.Limit = 200
-	}
-	where, args, err := buildEventWhere(filters)
-	if err != nil {
-		return EventPage{}, err
-	}
+	where, args := buildEventWhere(filters)
 	query := `
 		SELECT id, started_at_ms, status,
 		       COALESCE(plugin_name, ''), COALESCE(module_name, ''),
@@ -133,18 +124,15 @@ func (r *Repository) ListEvents(
 	if len(items) > filters.Limit {
 		last := items[filters.Limit-1]
 		page.Items = items[:filters.Limit]
-		page.NextCursor = r.cursor.Encode(last.startedAtMS, last.ID)
+		page.NextCursor = EncodeCursor(last.startedAtMS, last.ID)
 	}
 	return page, nil
 }
 
-func buildEventWhere(filters EventFilters) (string, []any, error) {
+func buildEventWhere(filters EventFilters) (string, []any) {
 	conditions := make([]string, 0, 6)
 	args := make([]any, 0, 8)
 	if filters.Status != "" {
-		if filters.Status != "success" && filters.Status != "failure" {
-			return "", nil, errors.New("status must be success or failure")
-		}
 		conditions = append(conditions, "status = ?")
 		args = append(args, filters.Status)
 	}
@@ -156,10 +144,6 @@ func buildEventWhere(filters EventFilters) (string, []any, error) {
 		conditions = append(conditions, "started_at_ms <= ?")
 		args = append(args, *filters.ToMS)
 	}
-	if filters.FromMS != nil && filters.ToMS != nil &&
-		*filters.FromMS > *filters.ToMS {
-		return "", nil, errors.New("from must not be later than to")
-	}
 	if filters.GroupID != "" {
 		conditions = append(conditions, "group_id = ?")
 		args = append(args, filters.GroupID)
@@ -168,25 +152,22 @@ func buildEventWhere(filters EventFilters) (string, []any, error) {
 		conditions = append(conditions, "plugin_name = ?")
 		args = append(args, filters.Plugin)
 	}
-	if filters.CursorMS != nil || filters.CursorID != nil {
-		if filters.CursorMS == nil || filters.CursorID == nil {
-			return "", nil, errors.New("cursor is incomplete")
-		}
+	if filters.CursorID != 0 {
 		conditions = append(
 			conditions,
 			"(started_at_ms < ? OR (started_at_ms = ? AND id < ?))",
 		)
 		args = append(
 			args,
-			*filters.CursorMS,
-			*filters.CursorMS,
-			*filters.CursorID,
+			filters.CursorMS,
+			filters.CursorMS,
+			filters.CursorID,
 		)
 	}
 	if len(conditions) == 0 {
-		return "", args, nil
+		return "", args
 	}
-	return " WHERE " + strings.Join(conditions, " AND "), args, nil
+	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
 type EventDetail struct {
@@ -283,15 +264,10 @@ func (r *Repository) Stats(
 	ctx context.Context,
 	filters EventFilters,
 ) (Stats, error) {
-	filters.CursorMS = nil
-	filters.CursorID = nil
-	filters.Limit = 0
-	where, args, err := buildEventWhere(filters)
-	if err != nil {
-		return Stats{}, err
-	}
+	filters.CursorID = 0
+	where, args := buildEventWhere(filters)
 	var stats Stats
-	err = r.db.QueryRowContext(
+	err := r.db.QueryRowContext(
 		ctx,
 		`SELECT COUNT(*),
 		        COALESCE(SUM(status = 'success'), 0),
@@ -450,8 +426,8 @@ type DiagnosticFilters struct {
 	Plugin   string
 	FromMS   *int64
 	ToMS     *int64
-	CursorMS *int64
-	CursorID *int64
+	CursorMS int64
+	CursorID int64
 	Limit    int
 }
 
@@ -487,22 +463,9 @@ func (r *Repository) ListDiagnostics(
 	ctx context.Context,
 	filters DiagnosticFilters,
 ) (DiagnosticPage, error) {
-	if filters.Limit <= 0 {
-		filters.Limit = 50
-	}
-	if filters.Limit > 200 {
-		filters.Limit = 200
-	}
 	conditions := make([]string, 0, 5)
 	args := make([]any, 0, 7)
 	if filters.Level != "" {
-		switch filters.Level {
-		case "WARNING", "ERROR", "CRITICAL":
-		default:
-			return DiagnosticPage{}, errors.New(
-				"level must be WARNING, ERROR, or CRITICAL",
-			)
-		}
 		conditions = append(conditions, "level = ?")
 		args = append(args, filters.Level)
 	}
@@ -538,23 +501,16 @@ func (r *Repository) ListDiagnostics(
 		conditions = append(conditions, "created_at_ms <= ?")
 		args = append(args, *filters.ToMS)
 	}
-	if filters.FromMS != nil && filters.ToMS != nil &&
-		*filters.FromMS > *filters.ToMS {
-		return DiagnosticPage{}, errors.New("from must not be later than to")
-	}
-	if filters.CursorMS != nil || filters.CursorID != nil {
-		if filters.CursorMS == nil || filters.CursorID == nil {
-			return DiagnosticPage{}, errors.New("cursor is incomplete")
-		}
+	if filters.CursorID != 0 {
 		conditions = append(
 			conditions,
 			"(created_at_ms < ? OR (created_at_ms = ? AND id < ?))",
 		)
 		args = append(
 			args,
-			*filters.CursorMS,
-			*filters.CursorMS,
-			*filters.CursorID,
+			filters.CursorMS,
+			filters.CursorMS,
+			filters.CursorID,
 		)
 	}
 	where := ""
@@ -605,7 +561,7 @@ func (r *Repository) ListDiagnostics(
 	if len(items) > filters.Limit {
 		last := items[filters.Limit-1]
 		page.Items = items[:filters.Limit]
-		page.NextCursor = r.cursor.Encode(last.createdAtMS, last.ID)
+		page.NextCursor = EncodeCursor(last.createdAtMS, last.ID)
 	}
 	return page, nil
 }

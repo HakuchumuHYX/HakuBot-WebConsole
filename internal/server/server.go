@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -14,11 +13,11 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"hakubot-webconsole/internal/csrf"
 	"hakubot-webconsole/internal/database"
 	"hakubot-webconsole/internal/query"
 	"hakubot-webconsole/internal/storage"
@@ -27,57 +26,35 @@ import (
 )
 
 type Server struct {
-	db            *sql.DB
-	repository    *query.Repository
-	cursor        query.CursorCodec
-	storage       *storage.Manager
-	csrf          *csrf.Protector
-	confirmations *csrf.ConfirmationStore
-	stream        http.Handler
-	static        http.Handler
-	sysCollector  *sysmonitor.Collector
-	sysRepo       *sysmonitor.Repository
-	mux           *http.ServeMux
-}
-
-type Options struct {
-	Storage       *storage.Manager
-	CSRF          *csrf.Protector
-	Confirmations *csrf.ConfirmationStore
-	Stream        http.Handler
-	Static        http.Handler
-	SysCollector  *sysmonitor.Collector
-	SysRepo       *sysmonitor.Repository
+	db           *sql.DB
+	repository   *query.Repository
+	storage      *storage.Manager
+	collector    *sysmonitor.Collector
+	publicOrigin string
+	mux          *http.ServeMux
 }
 
 func New(
 	db *sql.DB,
 	repository *query.Repository,
-	cursor query.CursorCodec,
-	options Options,
-) *Server {
+	storageManager *storage.Manager,
+	collector *sysmonitor.Collector,
+	publicOrigin string,
+	static http.Handler,
+) http.Handler {
 	server := &Server{
-		db:            db,
-		repository:    repository,
-		cursor:        cursor,
-		storage:       options.Storage,
-		csrf:          options.CSRF,
-		confirmations: options.Confirmations,
-		stream:        options.Stream,
-		static:        options.Static,
-		sysCollector:  options.SysCollector,
-		sysRepo:       options.SysRepo,
-		mux:           http.NewServeMux(),
+		db:           db,
+		repository:   repository,
+		storage:      storageManager,
+		collector:    collector,
+		publicOrigin: publicOrigin,
+		mux:          http.NewServeMux(),
 	}
-	server.routes()
-	return server
+	server.routes(static)
+	return securityHeaders(server.mux)
 }
 
-func (s *Server) Handler() http.Handler {
-	return securityHeaders(s.mux)
-}
-
-func (s *Server) routes() {
+func (s *Server) routes(static http.Handler) {
 	s.mux.HandleFunc("GET /healthz", s.health)
 	s.mux.HandleFunc("GET /readyz", s.ready)
 	s.mux.HandleFunc("GET /api/events", s.listEvents)
@@ -91,7 +68,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bot-status", s.botStatus)
 	s.mux.HandleFunc("GET /api/diagnostics", s.listDiagnostics)
 	s.mux.HandleFunc("GET /api/diagnostics/{id}", s.downloadDiagnostic)
-	s.mux.HandleFunc("GET /api/csrf", s.issueCSRF)
 	s.mux.HandleFunc("GET /api/storage", s.storageStats)
 	s.mux.HandleFunc("GET /api/system/status", s.systemStatus)
 	s.mux.HandleFunc("GET /api/system/history", s.systemHistory)
@@ -101,12 +77,7 @@ func (s *Server) routes() {
 	)
 	s.mux.HandleFunc("POST /api/storage/cleanup", s.cleanup)
 	s.mux.HandleFunc("POST /api/storage/reclaim", s.reclaim)
-	if s.stream != nil {
-		s.mux.Handle("GET /api/stream", s.stream)
-	}
-	if s.static != nil {
-		s.mux.Handle("GET /", s.static)
-	}
+	s.mux.Handle("GET /", static)
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -120,7 +91,8 @@ func securityHeaders(next http.Handler) http.Handler {
 		header.Set(
 			"Content-Security-Policy",
 			"default-src 'self'; connect-src 'self'; "+
-				"img-src 'self' data:; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
+				"script-src 'self' 'unsafe-inline'; "+
 				"frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 		)
 		next.ServeHTTP(writer, request)
@@ -143,7 +115,7 @@ func (s *Server) listEvents(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
-	filters, err := s.parseEventFilters(request)
+	filters, err := parseEventFilters(request)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
@@ -184,16 +156,16 @@ func (s *Server) downloadEventRaw(
 		return
 	}
 	part := request.PathValue("part")
+	if part != "input" && part != "output" && part != "logs" {
+		writeError(writer, http.StatusBadRequest, "invalid raw part")
+		return
+	}
 	payload, err := s.repository.EventRaw(request.Context(), id, part)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(writer, http.StatusNotFound, "raw event data not found")
 		return
 	}
 	if err != nil {
-		if strings.Contains(err.Error(), "invalid raw part") {
-			writeError(writer, http.StatusBadRequest, "invalid raw part")
-			return
-		}
 		s.internalError(writer, "read event raw data", err)
 		return
 	}
@@ -221,35 +193,44 @@ func (s *Server) downloadDiagnostic(
 	s.serveVerifiedPayload(writer, payload, false)
 }
 
+// serveVerifiedPayload decompresses fully and checks the stored SHA-256
+// before writing anything, so a corrupt payload never leaks partially.
 func (s *Server) serveVerifiedPayload(
 	writer http.ResponseWriter,
 	payload query.RawPayload,
 	attachment bool,
 ) {
-	if err := verifyCompressedPayload(payload); err != nil {
-		s.internalError(writer, "verify diagnostic payload", err)
-		return
-	}
 	reader, err := gzip.NewReader(bytes.NewReader(payload.Compressed))
 	if err != nil {
 		s.internalError(writer, "open diagnostic payload", err)
 		return
 	}
-	defer reader.Close()
-
-	disposition := "inline"
-	if attachment {
-		disposition = "attachment"
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		s.internalError(writer, "read diagnostic payload", err)
+		return
 	}
-	safeTime := strings.NewReplacer(
-		" ", "_",
-		":", "-",
-	).Replace(payload.TimeDisplay)
+	sum := sha256.Sum256(content)
+	if hex.EncodeToString(sum[:]) != payload.SHA256 {
+		s.internalError(
+			writer,
+			"verify diagnostic payload",
+			errors.New("SHA-256 mismatch"),
+		)
+		return
+	}
+
+	disposition, extension := "inline", "log"
+	if attachment {
+		disposition, extension = "attachment", "json"
+	}
+	safeTime := strings.NewReplacer(" ", "_", ":", "-").
+		Replace(payload.TimeDisplay)
 	filename := fmt.Sprintf(
 		"%s_%s_GMT+8.%s",
 		payload.FilenameStem,
 		safeTime,
-		map[bool]string{true: "json", false: "log"}[attachment],
+		extension,
 	)
 	writer.Header().Set("Content-Type", payload.ContentType)
 	writer.Header().Set(
@@ -257,33 +238,7 @@ func (s *Server) serveVerifiedPayload(
 		fmt.Sprintf(`%s; filename="%s"`, disposition, filename),
 	)
 	writer.WriteHeader(http.StatusOK)
-	if _, err := io.Copy(writer, reader); err != nil {
-		slog.Error("stream diagnostic payload", "error", err)
-	}
-}
-
-func verifyCompressedPayload(payload query.RawPayload) error {
-	expected, err := hex.DecodeString(payload.SHA256)
-	if err != nil || len(expected) != sha256.Size {
-		return errors.New("invalid stored SHA-256")
-	}
-	reader, err := gzip.NewReader(bytes.NewReader(payload.Compressed))
-	if err != nil {
-		return fmt.Errorf("open gzip: %w", err)
-	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(hash, reader)
-	closeErr := reader.Close()
-	if copyErr != nil {
-		return fmt.Errorf("read gzip: %w", copyErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close gzip: %w", closeErr)
-	}
-	if subtle.ConstantTimeCompare(hash.Sum(nil), expected) != 1 {
-		return errors.New("diagnostic SHA-256 mismatch")
-	}
-	return nil
+	_, _ = writer.Write(content)
 }
 
 func (s *Server) filters(writer http.ResponseWriter, request *http.Request) {
@@ -296,7 +251,7 @@ func (s *Server) filters(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) stats(writer http.ResponseWriter, request *http.Request) {
-	filters, err := s.parseEventFilters(request)
+	filters, err := parseEventFilters(request)
 	if err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
@@ -342,6 +297,16 @@ func (s *Server) listDiagnostics(
 		Plugin: strings.TrimSpace(values.Get("plugin")),
 		Limit:  parseLimit(values.Get("limit")),
 	}
+	switch filters.Level {
+	case "", "WARNING", "ERROR", "CRITICAL":
+	default:
+		writeError(
+			writer,
+			http.StatusBadRequest,
+			"level must be WARNING, ERROR, or CRITICAL",
+		)
+		return
+	}
 	var err error
 	filters.FromMS, filters.ToMS, err = parseTimeRange(
 		values.Get("from"),
@@ -351,51 +316,23 @@ func (s *Server) listDiagnostics(
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	if value := strings.TrimSpace(values.Get("cursor")); value != "" {
-		cursorMS, cursorID, decodeErr := s.cursor.Decode(value)
-		if decodeErr != nil {
-			writeError(writer, http.StatusBadRequest, "invalid cursor")
-			return
-		}
-		filters.CursorMS = &cursorMS
-		filters.CursorID = &cursorID
+	filters.CursorMS, filters.CursorID, err = parseCursor(values.Get("cursor"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
 	}
 	page, err := s.repository.ListDiagnostics(request.Context(), filters)
 	if err != nil {
-		if isValidationError(err) {
-			writeError(writer, http.StatusBadRequest, err.Error())
-			return
-		}
 		s.internalError(writer, "list diagnostics", err)
 		return
 	}
 	writeJSON(writer, http.StatusOK, page)
 }
 
-func (s *Server) issueCSRF(
-	writer http.ResponseWriter,
-	_ *http.Request,
-) {
-	if s.csrf == nil {
-		writeError(writer, http.StatusServiceUnavailable, "CSRF unavailable")
-		return
-	}
-	token, err := s.csrf.Issue(writer)
-	if err != nil {
-		s.internalError(writer, "issue CSRF token", err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]string{"csrf_token": token})
-}
-
 func (s *Server) storageStats(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
-	if s.storage == nil {
-		writeError(writer, http.StatusServiceUnavailable, "storage unavailable")
-		return
-	}
 	stats, err := s.storage.Stats(request.Context())
 	if err != nil {
 		s.internalError(writer, "query storage usage", err)
@@ -408,83 +345,41 @@ type cutoffRequest struct {
 	Cutoff string `json:"cutoff"`
 }
 
-type cleanupRequest struct {
-	Cutoff            string `json:"cutoff"`
-	ConfirmationToken string `json:"confirmation_token"`
-}
-
 func (s *Server) cleanupPreview(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
-	if !s.validateMutation(writer, request) {
-		return
-	}
-	var body cutoffRequest
-	if err := decodeJSONBody(writer, request, &body); err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	cutoff, err := timefmt.Parse(body.Cutoff)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid GMT+8 cutoff")
+	cutoff, ok := s.parseCutoffMutation(writer, request)
+	if !ok {
 		return
 	}
 	preview, err := s.storage.Preview(request.Context(), cutoff)
-	if err != nil {
+	if errors.Is(err, storage.ErrFutureCutoff) {
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	token, err := s.confirmations.Issue(csrf.ConfirmationClaims{
-		User:            csrf.AuthenticatedUser(request),
-		CutoffMS:        cutoff.UnixMilli(),
-		ResponseCount:   preview.ResponseCount,
-		DiagnosticCount: preview.DiagnosticCount,
-	})
 	if err != nil {
-		s.internalError(writer, "issue cleanup confirmation", err)
+		s.internalError(writer, "preview cleanup", err)
 		return
 	}
-	writeJSON(
-		writer,
-		http.StatusOK,
-		map[string]any{
-			"preview":            preview,
-			"confirmation_token": token,
-			"expires_in_seconds": 300,
-		},
-	)
+	writeJSON(writer, http.StatusOK, map[string]any{"preview": preview})
 }
 
 func (s *Server) cleanup(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
-	if !s.validateMutation(writer, request) {
-		return
-	}
-	var body cleanupRequest
-	if err := decodeJSONBody(writer, request, &body); err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	cutoff, err := timefmt.Parse(body.Cutoff)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid GMT+8 cutoff")
-		return
-	}
-	_, err = s.confirmations.Consume(
-		body.ConfirmationToken,
-		csrf.AuthenticatedUser(request),
-		cutoff.UnixMilli(),
-	)
-	if err != nil {
-		writeError(writer, http.StatusForbidden, err.Error())
+	cutoff, ok := s.parseCutoffMutation(writer, request)
+	if !ok {
 		return
 	}
 	result, err := s.storage.Cleanup(request.Context(), cutoff)
 	if errors.Is(err, storage.ErrBusy) {
 		writeError(writer, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, storage.ErrFutureCutoff) {
+		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err != nil {
@@ -493,8 +388,6 @@ func (s *Server) cleanup(
 	}
 	slog.Info(
 		"webconsole storage cleanup completed",
-		"user",
-		csrf.AuthenticatedUser(request),
 		"cutoff",
 		result.CutoffDisplay,
 		"responses_deleted",
@@ -526,22 +419,36 @@ func (s *Server) reclaim(
 		s.internalError(writer, "reclaim storage", err)
 		return
 	}
-	slog.Info(
-		"webconsole incremental storage reclaim completed",
-		"user",
-		csrf.AuthenticatedUser(request),
-	)
+	slog.Info("webconsole incremental storage reclaim completed")
 	writeJSON(writer, http.StatusOK, result)
 }
 
+func (s *Server) parseCutoffMutation(
+	writer http.ResponseWriter,
+	request *http.Request,
+) (time.Time, bool) {
+	if !s.validateMutation(writer, request) {
+		return time.Time{}, false
+	}
+	var body cutoffRequest
+	if err := decodeJSONBody(writer, request, &body); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return time.Time{}, false
+	}
+	cutoff, err := timefmt.Parse(body.Cutoff)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid GMT+8 cutoff")
+		return time.Time{}, false
+	}
+	return cutoff, true
+}
+
+// validateMutation blocks cross-site requests: browsers attach Basic Auth
+// automatically, but a cross-origin JSON POST carries a foreign Origin.
 func (s *Server) validateMutation(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) bool {
-	if s.storage == nil || s.csrf == nil || s.confirmations == nil {
-		writeError(writer, http.StatusServiceUnavailable, "mutation unavailable")
-		return false
-	}
 	mediaType, _, err := mime.ParseMediaType(
 		request.Header.Get("Content-Type"),
 	)
@@ -553,8 +460,9 @@ func (s *Server) validateMutation(
 		)
 		return false
 	}
-	if err := s.csrf.Validate(request); err != nil {
-		writeError(writer, http.StatusForbidden, err.Error())
+	origin, err := url.Parse(request.Header.Get("Origin"))
+	if err != nil || origin.Scheme+"://"+origin.Host != s.publicOrigin {
+		writeError(writer, http.StatusForbidden, "Origin is not allowed")
 		return false
 	}
 	return true
@@ -578,15 +486,22 @@ func decodeJSONBody(
 	return nil
 }
 
-func (s *Server) parseEventFilters(
-	request *http.Request,
-) (query.EventFilters, error) {
+func parseEventFilters(request *http.Request) (query.EventFilters, error) {
 	values := request.URL.Query()
 	filters := query.EventFilters{
 		Status:  strings.TrimSpace(values.Get("status")),
 		GroupID: strings.TrimSpace(values.Get("group_id")),
 		Plugin:  strings.TrimSpace(values.Get("plugin")),
 		Limit:   parseLimit(values.Get("limit")),
+	}
+	if filters.Status != "" &&
+		filters.Status != "success" && filters.Status != "failure" {
+		return query.EventFilters{}, errors.New(
+			"status must be success or failure",
+		)
+	}
+	if len(filters.GroupID) > 32 || len(filters.Plugin) > 256 {
+		return query.EventFilters{}, errors.New("filter value is too long")
 	}
 	var err error
 	filters.FromMS, filters.ToMS, err = parseTimeRange(
@@ -596,18 +511,19 @@ func (s *Server) parseEventFilters(
 	if err != nil {
 		return query.EventFilters{}, err
 	}
-	if len(filters.GroupID) > 32 || len(filters.Plugin) > 256 {
-		return query.EventFilters{}, errors.New("filter value is too long")
-	}
-	if value := strings.TrimSpace(values.Get("cursor")); value != "" {
-		cursorMS, cursorID, decodeErr := s.cursor.Decode(value)
-		if decodeErr != nil {
-			return query.EventFilters{}, errors.New("invalid cursor")
-		}
-		filters.CursorMS = &cursorMS
-		filters.CursorID = &cursorID
+	filters.CursorMS, filters.CursorID, err = parseCursor(values.Get("cursor"))
+	if err != nil {
+		return query.EventFilters{}, err
 	}
 	return filters, nil
+}
+
+func parseCursor(value string) (int64, int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, 0, nil
+	}
+	return query.DecodeCursor(value)
 }
 
 func parseTimeRange(from, to string) (*int64, *int64, error) {
@@ -645,10 +561,7 @@ func parseLimit(value string) int {
 	if err != nil || parsed <= 0 {
 		return 50
 	}
-	if parsed > 200 {
-		return 200
-	}
-	return parsed
+	return min(parsed, 200)
 }
 
 func positiveID(value string) (int64, error) {
@@ -659,10 +572,23 @@ func positiveID(value string) (int64, error) {
 	return id, nil
 }
 
-func isValidationError(err error) bool {
-	message := err.Error()
-	return strings.Contains(message, "must") ||
-		strings.Contains(message, "cursor")
+func (s *Server) systemStatus(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, s.collector.Status())
+}
+
+func (s *Server) systemHistory(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	history, err := s.collector.History(
+		request.Context(),
+		request.URL.Query().Get("window"),
+	)
+	if err != nil {
+		s.internalError(writer, "get system history", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, history)
 }
 
 func (s *Server) internalError(
@@ -680,31 +606,6 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	if err := json.NewEncoder(writer).Encode(value); err != nil {
 		slog.Error("encode JSON response", "error", err)
 	}
-}
-
-func (s *Server) systemStatus(writer http.ResponseWriter, _ *http.Request) {
-	if s.sysCollector == nil {
-		writeError(writer, http.StatusServiceUnavailable, "system monitor not enabled")
-		return
-	}
-	writeJSON(writer, http.StatusOK, s.sysCollector.GetStatus())
-}
-
-func (s *Server) systemHistory(writer http.ResponseWriter, request *http.Request) {
-	if s.sysRepo == nil {
-		writeError(writer, http.StatusServiceUnavailable, "system history repository not enabled")
-		return
-	}
-	window := request.URL.Query().Get("window")
-	if window == "" {
-		window = "1h"
-	}
-	history, err := s.sysRepo.GetHistory(request.Context(), window)
-	if err != nil {
-		s.internalError(writer, "get system history", err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, history)
 }
 
 func writeError(writer http.ResponseWriter, status int, message string) {

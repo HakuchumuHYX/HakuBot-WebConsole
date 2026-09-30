@@ -20,11 +20,6 @@
 *.crt
 *.htpasswd
 
-# Local-only tests and development output.
-*_test.go
-/tests/
-coverage.out
-
 # Private production notes and rendered deployment files.
 /PLAN.md
 /deploy/*.candidate

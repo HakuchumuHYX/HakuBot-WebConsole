@@ -3,7 +3,6 @@
 const state = {
   eventCursor: "",
   diagnosticCursor: "",
-  confirmationToken: "",
   previewCutoff: "",
   refreshTimer: null,
   clockTimer: null,
@@ -18,9 +17,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 function toast(message) {
   const element = $("#toast");
-  if (!element) return;
-  const msgElement = $("#toast-message") || element;
-  msgElement.textContent = message;
+  $("#toast-message").textContent = message;
   element.classList.remove("hidden");
   clearTimeout(element._timer);
   element._timer = setTimeout(() => element.classList.add("hidden"), 4500);
@@ -197,7 +194,7 @@ function createDetailCard(title, content, options = {}) {
 
 async function showEventDetail(id) {
   const detail = await (await api(`/api/events/${id}`)).json();
-  if ($("#detail-eyebrow")) $("#detail-eyebrow").textContent = "RESPONSE DETAIL";
+  $("#detail-eyebrow").textContent = "RESPONSE DETAIL";
   $("#detail-title").textContent = `${detail.plugin_name || detail.module_name || "未知插件"} · ${detail.status === "success" ? "成功" : "失败"}`;
   
   // 1. Meta Grid
@@ -224,28 +221,26 @@ async function showEventDetail(id) {
 
   // 2. Sections: Full Input & Output Cards
   const sections = $("#detail-sections");
-  if (sections) {
-    sections.replaceChildren();
-    sections.append(createDetailCard("📥 用户输入内容 (Request)", detail.request_summary || "（无输入内容）"));
-    sections.append(createDetailCard("📤 机器人响应内容 (Response)", detail.response_summary || "（无响应内容）"));
+  sections.replaceChildren();
+  sections.append(createDetailCard("📥 用户输入内容 (Request)", detail.request_summary || "（无输入内容）"));
+  sections.append(createDetailCard("📤 机器人响应内容 (Response)", detail.response_summary || "（无响应内容）"));
 
-    if (detail.status === "failure" || detail.error_type || detail.error_message) {
-      const errorText = [detail.error_type, detail.error_message].filter(Boolean).join(": ") || "未知错误";
-      sections.append(createDetailCard("⚠️ 错误详情 (Error Detail)", errorText, { className: "error-card", mono: true }));
-    }
+  if (detail.status === "failure" || detail.error_type || detail.error_message) {
+    const errorText = [detail.error_type, detail.error_message].filter(Boolean).join(": ") || "未知错误";
+    sections.append(createDetailCard("⚠️ 错误详情 (Error Detail)", errorText, { className: "error-card", mono: true }));
   }
 
   // 3. Raw Diagnostics Container (only show when has_full_diagnostics is true!)
   const rawActions = $("#raw-actions");
   const rawWrapper = $("#raw-content-wrapper");
-  if (rawActions) rawActions.replaceChildren();
+  rawActions.replaceChildren();
 
-  if (detail.has_full_diagnostics && rawActions && rawWrapper) {
+  if (detail.has_full_diagnostics) {
     rawActions.classList.remove("hidden");
     rawWrapper.classList.remove("hidden");
-    if ($("#raw-toolbar-title")) $("#raw-toolbar-title").textContent = "Payload & Logs";
+    $("#raw-toolbar-title").textContent = "Payload & Logs";
     $("#raw-content").textContent = "点击上方按钮查看完整原始数据。";
-    if ($("#copy-raw-btn")) $("#copy-raw-btn").classList.add("hidden");
+    $("#copy-raw-btn").classList.add("hidden");
 
     for (const [part, label] of [["input", "完整输入"], ["output", "完整输出"], ["logs", "完整日志"]]) {
       const view = document.createElement("button");
@@ -257,7 +252,7 @@ async function showEventDetail(id) {
       download.className = "button-link";
       rawActions.append(view, download);
     }
-  } else if (rawActions && rawWrapper) {
+  } else {
     rawActions.classList.add("hidden");
     rawWrapper.classList.add("hidden");
   }
@@ -269,7 +264,7 @@ async function loadRaw(path) {
   const target = $("#raw-content");
   const copyBtn = $("#copy-raw-btn");
   target.textContent = "正在加载完整内容…";
-  if (copyBtn) copyBtn.classList.add("hidden");
+  copyBtn.classList.add("hidden");
   try {
     const text = await (await api(path)).text();
     try {
@@ -278,7 +273,7 @@ async function loadRaw(path) {
     } catch (_) {
       target.textContent = text;
     }
-    if (copyBtn) copyBtn.classList.remove("hidden");
+    copyBtn.classList.remove("hidden");
   } catch (error) {
     target.textContent = `加载失败：${error.message}`;
   }
@@ -302,8 +297,7 @@ async function loadBotStatus() {
   const data = await (await api("/api/bot-status")).json();
   const element = $("#bot-status");
   element.className = `status ${data.online ? "online" : "offline"}`;
-  const textSpan = element.querySelector(".status-text") || element.lastElementChild;
-  textSpan.textContent = data.online ? "在线" : "离线";
+  element.querySelector(".status-text").textContent = data.online ? "在线" : "离线";
 }
 
 async function loadDiagnostics({ append = false } = {}) {
@@ -329,7 +323,7 @@ async function loadDiagnostics({ append = false } = {}) {
       textCell(item.message_summary, "summary"),
     );
     row.addEventListener("click", async () => {
-      if ($("#detail-eyebrow")) $("#detail-eyebrow").textContent = "DIAGNOSTIC LOG";
+      $("#detail-eyebrow").textContent = "DIAGNOSTIC LOG";
       $("#detail-title").textContent = `${item.level} · ${item.plugin_name || item.module_name || "系统"}`;
       
       const meta = $("#detail-meta");
@@ -348,19 +342,11 @@ async function loadDiagnostics({ append = false } = {}) {
         meta.append(box);
       }
 
-      const sections = $("#detail-sections");
-      if (sections) sections.replaceChildren();
-
-      const rawActions = $("#raw-actions");
-      const rawWrapper = $("#raw-content-wrapper");
-      if (rawActions) {
-        rawActions.replaceChildren();
-        rawActions.classList.add("hidden");
-      }
-      if (rawWrapper) {
-        rawWrapper.classList.remove("hidden");
-      }
-      if ($("#raw-toolbar-title")) $("#raw-toolbar-title").textContent = "完整诊断记录 (Traceback & Logs)";
+      $("#detail-sections").replaceChildren();
+      $("#raw-actions").replaceChildren();
+      $("#raw-actions").classList.add("hidden");
+      $("#raw-content-wrapper").classList.remove("hidden");
+      $("#raw-toolbar-title").textContent = "完整诊断记录 (Traceback & Logs)";
 
       $("#detail-dialog").showModal();
       await loadRaw(`/api/diagnostics/${item.id}`);
@@ -392,32 +378,32 @@ async function loadStorage() {
 
 async function loadSystemStatus() {
   const status = await (await api("/api/system/status")).json();
-  if ($("#sys-hostname")) $("#sys-hostname").textContent = status.hostname || "—";
-  if ($("#sys-os-kernel")) $("#sys-os-kernel").textContent = `${status.os} / ${status.kernel} (${status.arch})`;
-  if ($("#sys-cpu-model")) $("#sys-cpu-model").textContent = status.cpu_model || `${status.cpu_cores} 核`;
-  if ($("#sys-uptime-system")) $("#sys-uptime-system").textContent = status.system_uptime_desc || "—";
-  if ($("#sys-uptime-proc")) $("#sys-uptime-proc").textContent = status.process_uptime_desc || "—";
+  $("#sys-hostname").textContent = status.hostname || "—";
+  $("#sys-os-kernel").textContent = `${status.os} / ${status.kernel} (${status.arch})`;
+  $("#sys-cpu-model").textContent = status.cpu_model || `${status.cpu_cores} 核`;
+  $("#sys-uptime-system").textContent = status.system_uptime_desc || "—";
+  $("#sys-uptime-proc").textContent = status.process_uptime_desc || "—";
 
-  const curr = status.current || {};
-  if ($("#sys-cpu-pct")) $("#sys-cpu-pct").textContent = `${(curr.cpu_percent || 0).toFixed(1)}%`;
-  if ($("#sys-cpu-bar")) $("#sys-cpu-bar").style.width = `${Math.min(100, Math.max(0, curr.cpu_percent || 0))}%`;
-  if ($("#sys-cpu-cores-badge")) $("#sys-cpu-cores-badge").textContent = `${status.cpu_cores} 核`;
+  const curr = status.current;
+  $("#sys-cpu-pct").textContent = `${curr.cpu_percent.toFixed(1)}%`;
+  $("#sys-cpu-bar").style.width = `${Math.min(100, curr.cpu_percent)}%`;
+  $("#sys-cpu-cores-badge").textContent = `${status.cpu_cores} 核`;
 
-  if ($("#sys-mem-pct")) $("#sys-mem-pct").textContent = `${(curr.memory_percent || 0).toFixed(1)}%`;
-  if ($("#sys-mem-bar")) $("#sys-mem-bar").style.width = `${Math.min(100, Math.max(0, curr.memory_percent || 0))}%`;
-  if ($("#sys-mem-text")) $("#sys-mem-text").textContent = `${formatBytes(curr.memory_used_bytes)} / ${formatBytes(curr.memory_total_bytes)}`;
-  if ($("#sys-swap-text")) $("#sys-swap-text").textContent = `${formatBytes(curr.swap_used_bytes)} / ${formatBytes(curr.swap_total_bytes)}`;
+  $("#sys-mem-pct").textContent = `${curr.memory_percent.toFixed(1)}%`;
+  $("#sys-mem-bar").style.width = `${Math.min(100, curr.memory_percent)}%`;
+  $("#sys-mem-text").textContent = `${formatBytes(curr.memory_used_bytes)} / ${formatBytes(curr.memory_total_bytes)}`;
+  $("#sys-swap-text").textContent = `${formatBytes(curr.swap_used_bytes)} / ${formatBytes(curr.swap_total_bytes)}`;
 
-  if ($("#sys-disk-pct")) $("#sys-disk-pct").textContent = `${(curr.disk_percent || 0).toFixed(1)}%`;
-  if ($("#sys-disk-bar")) $("#sys-disk-bar").style.width = `${Math.min(100, Math.max(0, curr.disk_percent || 0))}%`;
-  if ($("#sys-disk-text")) $("#sys-disk-text").textContent = `${formatBytes(curr.disk_used_bytes)} / ${formatBytes(curr.disk_total_bytes)}`;
+  $("#sys-disk-pct").textContent = `${curr.disk_percent.toFixed(1)}%`;
+  $("#sys-disk-bar").style.width = `${Math.min(100, curr.disk_percent)}%`;
+  $("#sys-disk-text").textContent = `${formatBytes(curr.disk_used_bytes)} / ${formatBytes(curr.disk_total_bytes)}`;
 
-  if ($("#sys-load-text")) $("#sys-load-text").textContent = `${(curr.load1 || 0).toFixed(2)} / ${(curr.load5 || 0).toFixed(2)} / ${(curr.load15 || 0).toFixed(2)}`;
-  if ($("#sys-procs-text")) $("#sys-procs-text").textContent = `${curr.process_count || 0}`;
-  if ($("#sys-goroutines-text")) $("#sys-goroutines-text").textContent = `${status.goroutines || 0} (${formatBytes(status.go_heap_alloc_bytes)})`;
+  $("#sys-load-text").textContent = `${curr.load1.toFixed(2)} / ${curr.load5.toFixed(2)} / ${curr.load15.toFixed(2)}`;
+  $("#sys-procs-text").textContent = `${curr.process_count}`;
+  $("#sys-goroutines-text").textContent = `${status.goroutines} (${formatBytes(status.go_heap_alloc_bytes)})`;
 
-  if ($("#sys-net-rx")) $("#sys-net-rx").textContent = `↓ ${formatBytes(curr.net_rx_bytes_per_sec)}/s`;
-  if ($("#sys-net-tx")) $("#sys-net-tx").textContent = `↑ ${formatBytes(curr.net_tx_bytes_per_sec)}/s`;
+  $("#sys-net-rx").textContent = `↓ ${formatBytes(curr.net_rx_bytes_per_sec)}/s`;
+  $("#sys-net-tx").textContent = `↑ ${formatBytes(curr.net_tx_bytes_per_sec)}/s`;
 }
 
 async function loadSystemHistory(window = state.systemWindow) {
@@ -434,9 +420,9 @@ async function loadSystemHistory(window = state.systemWindow) {
       if (p.cpu_max > maxCPU) maxCPU = p.cpu_max;
       if (p.cpu_percent > maxCPU) maxCPU = p.cpu_percent;
     }
-    if ($("#chart-cpu-stat")) $("#chart-cpu-stat").textContent = `当前: ${last.cpu_percent.toFixed(1)}% | 峰值: ${maxCPU.toFixed(1)}%`;
-    if ($("#chart-mem-stat")) $("#chart-mem-stat").textContent = `当前: ${last.memory_percent.toFixed(1)}% (${formatBytes(last.memory_used_bytes)})`;
-    if ($("#chart-net-stat")) $("#chart-net-stat").textContent = `下行: ${formatBytes(last.net_rx_bytes_per_sec)}/s | 上行: ${formatBytes(last.net_tx_bytes_per_sec)}/s`;
+    $("#chart-cpu-stat").textContent = `当前: ${last.cpu_percent.toFixed(1)}% | 峰值: ${maxCPU.toFixed(1)}%`;
+    $("#chart-mem-stat").textContent = `当前: ${last.memory_percent.toFixed(1)}% (${formatBytes(last.memory_used_bytes)})`;
+    $("#chart-net-stat").textContent = `下行: ${formatBytes(last.net_rx_bytes_per_sec)}/s | 上行: ${formatBytes(last.net_tx_bytes_per_sec)}/s`;
   }
 
   // Render CPU Chart
@@ -771,21 +757,15 @@ function calendarMonthsAgo(months) {
 function updateCleanupCutoff() {
   const value = $("#cleanup-period").value;
   if (value !== "custom") $("#cleanup-cutoff").value = calendarMonthsAgo(Number(value));
-  state.confirmationToken = "";
+  state.previewCutoff = "";
   $("#execute-cleanup").disabled = true;
-  const preview = $("#cleanup-preview");
-  const span = preview.querySelector("span") || preview;
-  span.textContent = "截止时间已变化，请重新预览。";
+  $("#cleanup-preview span").textContent = "截止时间已变化，请重新预览。";
 }
 
 async function mutation(path, body) {
-  const csrf = await (await api("/api/csrf")).json();
   return api(path, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-CSRF-Token": csrf.csrf_token,
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -794,30 +774,21 @@ async function previewCleanup() {
   const cutoff = inputToAPI($("#cleanup-cutoff").value);
   if (!cutoff) throw new Error("请选择完整的 GMT+8 截止时间");
   const data = await (await mutation("/api/storage/cleanup/preview", { cutoff })).json();
-  state.confirmationToken = data.confirmation_token;
   state.previewCutoff = cutoff;
-  const preview = $("#cleanup-preview");
-  const span = preview.querySelector("span") || preview;
-  span.textContent = `将删除 ${data.preview.response_count} 条响应和 ${data.preview.diagnostic_count} 条诊断；截止点：${data.preview.cutoff_display} GMT+8。`;
+  $("#cleanup-preview span").textContent = `将删除 ${data.preview.response_count} 条响应和 ${data.preview.diagnostic_count} 条诊断；截止点：${data.preview.cutoff_display} GMT+8。`;
   const execute = $("#execute-cleanup");
   execute.textContent = `清理 ${data.preview.cutoff_display} GMT+8 之前的日志`;
   execute.disabled = false;
 }
 
 async function executeCleanup() {
-  if (!state.confirmationToken) throw new Error("请先预览清理范围");
+  if (!state.previewCutoff) throw new Error("请先预览清理范围");
   const exact = `将永久删除 ${state.previewCutoff} GMT+8 之前的日志。此操作无法撤销，是否继续？`;
   if (!window.confirm(exact)) return;
-  const button = $("#execute-cleanup");
-  button.disabled = true;
-  const data = await (await mutation("/api/storage/cleanup", {
-    cutoff: state.previewCutoff,
-    confirmation_token: state.confirmationToken,
-  })).json();
-  state.confirmationToken = "";
-  const preview = $("#cleanup-preview");
-  const span = preview.querySelector("span") || preview;
-  span.textContent = `完成：删除 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断。`;
+  $("#execute-cleanup").disabled = true;
+  const data = await (await mutation("/api/storage/cleanup", { cutoff: state.previewCutoff })).json();
+  state.previewCutoff = "";
+  $("#cleanup-preview span").textContent = `完成：删除 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断。`;
   toast("日志清理和增量空间回收已完成");
   await Promise.all([loadStorage(), loadEvents(), loadDiagnostics()]);
 }
@@ -923,25 +894,19 @@ function bindEvents() {
     }, 150);
   });
 
-  if ($("#copy-raw-btn")) {
-    $("#copy-raw-btn").addEventListener("click", () => {
-      const text = $("#raw-content").textContent;
-      if (text) {
-        navigator.clipboard.writeText(text).then(() => toast("已复制到剪贴板")).catch(() => toast("复制失败"));
-      }
-    });
-  }
-  if ($("#toggle-event-filters")) {
-    $("#toggle-event-filters").addEventListener("click", () => {
-      const grid = $("#event-filters .filter-grid");
-      const isHidden = getComputedStyle(grid).display === "none";
-      grid.style.display = isHidden ? "grid" : "none";
-      $("#toggle-event-filters").textContent = isHidden ? "收起筛选" : "展开筛选";
-    });
-  }
-  if ($("#theme-toggle")) {
-    $("#theme-toggle").addEventListener("click", toggleTheme);
-  }
+  $("#copy-raw-btn").addEventListener("click", () => {
+    const text = $("#raw-content").textContent;
+    if (text) {
+      navigator.clipboard.writeText(text).then(() => toast("已复制到剪贴板")).catch(() => toast("复制失败"));
+    }
+  });
+  $("#toggle-event-filters").addEventListener("click", () => {
+    const grid = $("#event-filters .filter-grid");
+    const isHidden = getComputedStyle(grid).display === "none";
+    grid.style.display = isHidden ? "grid" : "none";
+    $("#toggle-event-filters").textContent = isHidden ? "收起筛选" : "展开筛选";
+  });
+  $("#theme-toggle").addEventListener("click", toggleTheme);
 }
 
 function getTheme() {
@@ -951,10 +916,7 @@ function getTheme() {
 function setTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("webconsole_theme", theme);
-  const metaColorScheme = $('meta[name="color-scheme"]');
-  if (metaColorScheme) {
-    metaColorScheme.setAttribute("content", theme === "light" ? "light dark" : "dark light");
-  }
+  $('meta[name="color-scheme"]').setAttribute("content", theme === "light" ? "light dark" : "dark light");
   if ($(".tab.active")?.dataset.view === "system" && state.systemHistoryData) {
     loadSystemHistory(state.systemWindow).catch(() => {});
   }

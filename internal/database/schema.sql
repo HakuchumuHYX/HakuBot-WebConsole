@@ -1,18 +1,11 @@
+-- Executed on every startup. IF NOT EXISTS never alters an existing table,
+-- so changes to existing structure must be applied with a one-off script.
+
 PRAGMA auto_vacuum = INCREMENTAL;
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
 
-BEGIN IMMEDIATE;
-
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    applied_at_ms INTEGER NOT NULL
-) STRICT;
-
-CREATE TABLE response_events (
+CREATE TABLE IF NOT EXISTS response_events (
     id INTEGER PRIMARY KEY,
     run_id TEXT NOT NULL UNIQUE,
     started_at_ms INTEGER NOT NULL,
@@ -62,7 +55,7 @@ CREATE TABLE response_events (
     )
 ) STRICT;
 
-CREATE TABLE diagnostic_logs (
+CREATE TABLE IF NOT EXISTS diagnostic_logs (
     id INTEGER PRIMARY KEY,
     run_id TEXT,
     created_at_ms INTEGER NOT NULL,
@@ -75,7 +68,7 @@ CREATE TABLE diagnostic_logs (
     raw_sha256 TEXT NOT NULL CHECK (length(raw_sha256) = 64)
 ) STRICT;
 
-CREATE TABLE bot_status (
+CREATE TABLE IF NOT EXISTS bot_status (
     bot_id TEXT PRIMARY KEY,
     adapter TEXT NOT NULL,
     connected INTEGER NOT NULL DEFAULT 0 CHECK (connected IN (0, 1)),
@@ -87,28 +80,32 @@ CREATE TABLE bot_status (
     updated_at_ms INTEGER NOT NULL
 ) STRICT;
 
-CREATE INDEX idx_response_events_started
+-- One row per 30 seconds; the collector keeps 7 days.
+CREATE TABLE IF NOT EXISTS host_metrics (
+    timestamp_ms INTEGER PRIMARY KEY,
+    cpu_avg REAL NOT NULL,
+    cpu_max REAL NOT NULL,
+    memory_percent REAL NOT NULL,
+    memory_used_bytes INTEGER NOT NULL,
+    memory_total_bytes INTEGER NOT NULL,
+    disk_percent REAL NOT NULL,
+    load1 REAL NOT NULL,
+    net_rx_bytes_per_sec REAL NOT NULL,
+    net_tx_bytes_per_sec REAL NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_response_events_started
     ON response_events(started_at_ms DESC, id DESC);
-CREATE INDEX idx_response_events_status_started
+CREATE INDEX IF NOT EXISTS idx_response_events_status_started
     ON response_events(status, started_at_ms DESC, id DESC);
-CREATE INDEX idx_response_events_group_started
+CREATE INDEX IF NOT EXISTS idx_response_events_group_started
     ON response_events(group_id, started_at_ms DESC, id DESC);
-CREATE INDEX idx_response_events_plugin_started
+CREATE INDEX IF NOT EXISTS idx_response_events_plugin_started
     ON response_events(plugin_name, started_at_ms DESC, id DESC);
 
-CREATE INDEX idx_diagnostic_logs_created
+CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_created
     ON diagnostic_logs(created_at_ms DESC, id DESC);
-CREATE INDEX idx_diagnostic_logs_level_created
+CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_level_created
     ON diagnostic_logs(level, created_at_ms DESC, id DESC);
-CREATE INDEX idx_diagnostic_logs_run
+CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_run
     ON diagnostic_logs(run_id);
-
-INSERT INTO schema_migrations(version, name, applied_at_ms)
-VALUES (
-    1,
-    'initial',
-    CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
-);
-
-COMMIT;
-

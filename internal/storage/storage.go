@@ -14,7 +14,10 @@ import (
 	"hakubot-webconsole/internal/timefmt"
 )
 
-var ErrBusy = errors.New("storage maintenance is already running")
+var (
+	ErrBusy         = errors.New("storage maintenance is already running")
+	ErrFutureCutoff = errors.New("cleanup cutoff cannot be in the future")
+)
 
 type Manager struct {
 	db            *sql.DB
@@ -120,8 +123,8 @@ func (m *Manager) Preview(
 	ctx context.Context,
 	cutoff time.Time,
 ) (Preview, error) {
-	if cutoff.After(time.Now().In(timefmt.Location)) {
-		return Preview{}, errors.New("cleanup cutoff cannot be in the future")
+	if cutoff.After(time.Now()) {
+		return Preview{}, ErrFutureCutoff
 	}
 	cutoffMS := cutoff.UnixMilli()
 	var preview Preview
@@ -177,10 +180,8 @@ func (m *Manager) Cleanup(
 		return CleanupResult{}, ErrBusy
 	}
 	defer m.maintenance.Unlock()
-	if cutoff.After(time.Now().In(timefmt.Location)) {
-		return CleanupResult{}, errors.New(
-			"cleanup cutoff cannot be in the future",
-		)
+	if cutoff.After(time.Now()) {
+		return CleanupResult{}, ErrFutureCutoff
 	}
 	before, err := m.Stats(ctx)
 	if err != nil {

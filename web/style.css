@@ -1,4 +1,6 @@
 :root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei UI", "Noto Sans SC", sans-serif;
+  --font-mono: "SF Mono", Consolas, "JetBrains Mono", monospace;
   --bg: #090c15;
   --bg-gradient: radial-gradient(circle at 85% -15%, rgba(99, 102, 241, 0.16) 0%, transparent 45%),
                  radial-gradient(circle at 10% 120%, rgba(168, 85, 247, 0.12) 0%, transparent 45%),
@@ -100,7 +102,7 @@ html, body {
   background: var(--bg-gradient);
   background-attachment: fixed;
   color: var(--text);
-  font-family: 'Plus Jakarta Sans', 'Outfit', 'PingFang SC', 'HarmonyOS Sans SC', 'MiSans', 'Microsoft YaHei UI', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
@@ -108,12 +110,12 @@ html, body {
 }
 
 .font-mono {
-  font-family: 'JetBrains Mono', 'SF Mono', Consolas, Monaco, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
 .font-heading {
-  font-family: 'Plus Jakarta Sans', 'Outfit', sans-serif;
+  font-family: var(--font-sans);
   letter-spacing: -0.02em;
 }
 
@@ -303,11 +305,11 @@ h1, h2, h3, p { margin: 0; }
   background: linear-gradient(135deg, #ffffff 0%, #e2e8f0 60%, #94a3b8 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  font-family: 'Plus Jakarta Sans', 'Outfit', sans-serif;
+  font-family: var(--font-sans);
 }
 .eyebrow {
   margin-bottom: 0.2rem;
-  font-family: 'Plus Jakarta Sans', 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.18em;
@@ -603,7 +605,7 @@ main {
 
 .stat-info { display: flex; flex-direction: column; gap: 0.2rem; }
 .stat-info span { color: var(--muted); font-size: 0.76rem; font-weight: 500; letter-spacing: 0.02em; }
-.stat-info strong { font-size: 1.6rem; font-weight: 700; color: var(--text); letter-spacing: -0.02em; font-family: 'Plus Jakarta Sans', 'Outfit', sans-serif; }
+.stat-info strong { font-size: 1.6rem; font-weight: 700; color: var(--text); letter-spacing: -0.02em; }
 
 /* Table Panel & Responsive Table */
 .table-panel {
@@ -793,7 +795,7 @@ tbody tr:hover td {
   font-weight: 500;
 }
 .storage-card-header svg { color: var(--accent); opacity: 0.85; }
-.storage-card strong { font-size: 1.45rem; color: var(--text); font-family: 'Plus Jakarta Sans', 'Outfit', sans-serif; font-weight: 700; }
+.storage-card strong { font-size: 1.45rem; color: var(--text); font-weight: 700; }
 
 .storage-control {
   padding: 1.5rem;
@@ -991,7 +993,7 @@ dialog::backdrop {
   font-family: inherit;
 }
 .detail-card-body.font-mono {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 0.8rem;
 }
 .detail-card.error-card {
@@ -1171,7 +1173,7 @@ dialog::backdrop {
   /* Specific TD positioning for Event rows on mobile */
   #event-rows tr td:nth-child(1) { /* Time */
     color: var(--muted);
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.74rem;
     margin-bottom: 0.4rem;
     padding-right: 5rem; /* Make room for absolute badge */
@@ -1220,7 +1222,7 @@ dialog::backdrop {
   /* Specific TD positioning for Diagnostic rows on mobile */
   #diagnostic-rows tr td:nth-child(1) { /* Time */
     color: var(--muted);
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.74rem;
     margin-bottom: 0.4rem;
     padding-right: 6rem;
@@ -1364,7 +1366,7 @@ dialog::backdrop {
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.02em;
-  font-family: 'Plus Jakarta Sans', 'Outfit', sans-serif;
+  font-family: var(--font-sans);
 }
 .metric-sub-badge {
   margin-left: auto;
@@ -1397,7 +1399,6 @@ dialog::backdrop {
 .progress-blue { background: linear-gradient(90deg, #6366f1, #38bdf8); box-shadow: 0 0 10px var(--accent-glow); }
 .progress-purple { background: linear-gradient(90deg, #c084fc, #ec4899); box-shadow: 0 0 10px var(--purple-glow); }
 .progress-green { background: linear-gradient(90deg, #34d399, #10b981); box-shadow: 0 0 10px var(--success-glow); }
-.progress-yellow { background: linear-gradient(90deg, #fbbf24, #f59e0b); box-shadow: 0 0 10px var(--warning-glow); }
 
 .metric-sub-detail {
   display: flex;

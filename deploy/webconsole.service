@@ -11,8 +11,6 @@ User=webconsole
 Group=webconsole
 WorkingDirectory=__INSTALL_ROOT__
 ExecStart=__INSTALL_ROOT__/bin/webconsole
-Environment=WEBCONSOLE_CONFIG=__INSTALL_ROOT__/config.json
-EnvironmentFile=-/etc/default/webconsole
 Restart=always
 RestartSec=3
 TimeoutStopSec=15

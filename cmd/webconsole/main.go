@@ -12,12 +12,10 @@ import (
 	"time"
 
 	"hakubot-webconsole/internal/config"
-	"hakubot-webconsole/internal/csrf"
 	"hakubot-webconsole/internal/database"
 	"hakubot-webconsole/internal/query"
 	"hakubot-webconsole/internal/server"
 	"hakubot-webconsole/internal/storage"
-	"hakubot-webconsole/internal/stream"
 	"hakubot-webconsole/internal/sysmonitor"
 	"hakubot-webconsole/internal/watchdog"
 	webassets "hakubot-webconsole/web"
@@ -51,43 +49,28 @@ func run() error {
 	}
 	defer db.Close()
 
-	cursor := query.NewCursorCodec(cfg.TokenSecret)
-	repository := query.NewRepository(db, cursor)
 	storageManager := storage.NewManager(
 		db,
 		cfg.DatabasePath,
 		cfg.SpoolPath,
 		cfg.RetentionDays,
 	)
-	streamHandler := stream.NewHandler(db, repository)
 	sysCollector := sysmonitor.NewCollector(db, cfg.DatabasePath)
-	sysRepo := sysmonitor.NewRepository(db)
 
 	handler := server.New(
 		db,
-		repository,
-		cursor,
-		server.Options{
-			Storage: storageManager,
-			CSRF: csrf.NewProtector(
-				cfg.TokenSecret,
-				cfg.PublicOrigin,
-			),
-			Confirmations: csrf.NewConfirmationStore(),
-			Stream:        streamHandler,
-			SysCollector:  sysCollector,
-			SysRepo:       sysRepo,
-			Static: http.FileServer(
-				http.FS(webassets.Files),
-			),
-		},
+		query.NewRepository(db),
+		storageManager,
+		sysCollector,
+		cfg.PublicOrigin,
+		http.FileServer(http.FS(webassets.Files)),
 	)
 	httpServer := &http.Server{
-		Handler:           handler.Handler(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       90 * time.Second,
-		// SSE and complete diagnostic downloads intentionally have no
+		// Complete diagnostic downloads can be large, so there is no
 		// server-wide write deadline.
 		WriteTimeout: 0,
 	}
