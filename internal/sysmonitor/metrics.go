@@ -11,8 +11,7 @@ import (
 )
 
 type MetricSample struct {
-	TimestampMs      int64   `json:"timestamp_ms"`
-	TimeDisplay      string  `json:"time_display"`
+	TimestampMs      int64   `json:"-"`
 	CPUPercent       float64 `json:"cpu_percent"`
 	MemoryUsedBytes  uint64  `json:"memory_used_bytes"`
 	MemoryTotalBytes uint64  `json:"memory_total_bytes"`
@@ -25,7 +24,6 @@ type MetricSample struct {
 	Load1            float64 `json:"load1"`
 	Load5            float64 `json:"load5"`
 	Load15           float64 `json:"load15"`
-	UptimeSeconds    int64   `json:"uptime_seconds"`
 	NetRxBytesPerSec float64 `json:"net_rx_bytes_per_sec"`
 	NetTxBytesPerSec float64 `json:"net_tx_bytes_per_sec"`
 	ProcessCount     int     `json:"process_count"`
@@ -40,8 +38,6 @@ type SystemStatus struct {
 	CPUCores          int          `json:"cpu_cores"`
 	SystemUptimeDesc  string       `json:"system_uptime_desc"`
 	ProcessUptimeDesc string       `json:"process_uptime_desc"`
-	SystemUptimeSec   int64        `json:"system_uptime_sec"`
-	ProcessUptimeSec  int64        `json:"process_uptime_sec"`
 	Goroutines        int          `json:"goroutines"`
 	GoHeapAllocBytes  uint64       `json:"go_heap_alloc_bytes"`
 	Current           MetricSample `json:"current"`

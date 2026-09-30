@@ -82,7 +82,9 @@ func run() error {
 
 	go watchdog.Start(ctx)
 	go sysCollector.Start(ctx)
-	go runAutomaticRetention(ctx, storageManager)
+	if cfg.RetentionDays > 0 {
+		go runAutomaticRetention(ctx, storageManager)
+	}
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- httpServer.Serve(listener)
@@ -128,24 +130,19 @@ func runAutomaticRetention(
 			return
 		case <-timer.C:
 		}
-		result, enabled, err := manager.RunAutomaticRetention(
-			ctx,
-			time.Now(),
-		)
+		result, err := manager.RunAutomaticRetention(ctx, time.Now())
 		if err != nil {
 			slog.Error("automatic log retention failed", "error", err)
 			continue
 		}
-		if enabled {
-			slog.Info(
-				"automatic log retention completed",
-				"cutoff",
-				result.CutoffDisplay,
-				"responses_deleted",
-				result.ResponsesDeleted,
-				"diagnostics_deleted",
-				result.DiagnosticsDeleted,
-			)
-		}
+		slog.Info(
+			"automatic log retention completed",
+			"cutoff",
+			result.CutoffDisplay,
+			"responses_deleted",
+			result.ResponsesDeleted,
+			"diagnostics_deleted",
+			result.DiagnosticsDeleted,
+		)
 	}
 }

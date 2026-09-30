@@ -8,12 +8,13 @@ HakuBot WebConsole 是一个独立的 Go 网页服务，用来查看 HakuBot/Non
 
 ## 功能
 
-- 按成功/失败、GMT+8 时间范围、群号和插件筛选事件响应。
+- 按成功/失败、GMT+8 时间范围、群号和插件筛选事件响应；带 WARNING 的成功响应单独标识。
 - 页面每 3 秒刷新当前视图；快捷时间使用滑动窗口。
-- 展示 Bot 当前在线或离线，不保存掉线/恢复历史。
+- 展示 Bot QQ 和当前在线/离线，不保存掉线/恢复历史。
 - 对 WARNING、ERROR、CRITICAL 和失败响应保存完整输入、输出、日志及 traceback。
-- SQLite、WAL 和磁盘 spool 持久化。
+- SQLite、WAL 和磁盘 spool 持久化；存储页展示占用、记录时间范围和自动保留策略。
 - 按自选 GMT+8 截止时间预览、清理并增量回收旧日志。
+- 服务器 CPU、内存、磁盘、网络的实时状态和 7 天历史曲线。
 - systemd watchdog、崩溃自动重启和 Nginx HTTPS 反向代理。
 
 ## 两个仓库的边界
@@ -98,7 +99,7 @@ cp config.example.json config.json
   "listen": "127.0.0.1:54322",
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
   "spool_path": "/var/lib/hakubot-webconsole/spool",
-  "public_origin": "https://203.0.113.10:54321",
+  "public_origin": "https://console.example.com",
   "retention_days": 90
 }
 ```
@@ -110,7 +111,7 @@ cp config.example.json config.json
 | `listen` | Go 后端监听地址，必须是字面量回环 IP |
 | `database_path` | SQLite 文件的绝对路径 |
 | `spool_path` | 高优先级完整诊断 spool 的绝对路径 |
-| `public_origin` | 浏览器实际访问的 HTTPS Origin，包含非标准端口；清理接口只接受这个 Origin 发起的请求 |
+| `public_origin` | 浏览器实际访问的 HTTPS Origin（非 443 端口要带上端口）；清理接口只接受这个 Origin 发起的请求 |
 | `retention_days` | 自动保留天数；`0` 表示关闭自动清理 |
 
 程序只读取当前工作目录下的 `config.json`，systemd 模板通过 `WorkingDirectory` 指定工作目录。
@@ -182,33 +183,27 @@ sudo systemctl enable --now webconsole.service
 
 ## 7. Nginx、HTTPS 和 Basic Auth
 
-Go 后端只能监听 `127.0.0.1:54322`，公网端口由 Nginx 提供。
+Go 后端只能监听 `127.0.0.1:54322`，公网入口由 Nginx 在 443 上提供，建议用独立子域名
+（例如 `console.example.com`）。Nginx 只负责 TLS、Basic Auth 和限流；请求方法、清理接口的
+Origin 校验以及 HSTS 以外的全部响应头都由 Go 处理。
 
-部署目录包含：
-
-```text
-deploy/nginx-webconsole.conf.example
-deploy/nginx-webconsole-acme.conf
-deploy/webconsole_proxy.inc
-deploy/certbot-deploy-hook.sh
-```
-
-替换模板中的占位符：
+复制 `deploy/nginx-webconsole.conf.example`，替换占位符：
 
 ```text
-__PUBLIC_IP_OR_HOST__
+__SERVER_NAME__
 __TLS_FULLCHAIN_PATH__
 __TLS_PRIVATE_KEY_PATH__
 __HTPASSWD_PATH__
 __NGINX_LOG_DIR__
-__WEBCONSOLE_PROXY_INCLUDE__
-__ACME_WEBROOT__
 ```
+
+证书只要是浏览器信任的即可，例如 Let's Encrypt 的域名或通配符证书，续期后 reload Nginx。
 
 还要在 Nginx 的 `http {}` 中加入模板顶部注明的：
 
 ```nginx
 limit_req_zone $binary_remote_addr zone=webconsole:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=perip:10m;
 log_format webconsole
     '$remote_addr - $remote_user [$time_local] '
     '"$request_method $uri $server_protocol" $status $body_bytes_sent '
@@ -227,17 +222,7 @@ sudo chmod 0640 /etc/nginx/.htpasswd_webconsole
 
 实际 Nginx worker 组可能是 `www-data`、`nginx` 或面板自定义用户，请按服务器配置调整。
 
-如果使用 Let’s Encrypt IP 地址证书，需要支持 IP issuance 的 Certbot 版本，并为
-HTTP-01 保持 `/.well-known/acme-challenge/` 可访问。证书续期后使用
-`certbot-deploy-hook.sh` 校验并 reload Nginx。标准 Nginx 无需修改；自定义安装可设置：
-
-```text
-NGINX_BIN
-NGINX_CONFIG
-```
-
-只有在 `nginx -t` 成功、HTTPS 和 Basic Auth 已验证后，才开放公网 TCP 54321。
-不要把 `127.0.0.1:54322` 暴露到公网。
+`nginx -t` 通过后再 reload。不要把 `127.0.0.1:54322` 暴露到公网。
 
 ## 8. 数据与隐私
 
@@ -259,19 +244,6 @@ bin/
 
 项目 `.gitignore` 还会排除私有实施文档和渲染后的部署文件。
 
-首次提交前检查：
-
-```bash
-git add .
-git status --short
-git ls-files
-git check-ignore -v config.json
-git check-ignore -v data/webconsole.db
-```
-
-确认暂存内容中没有真实公网 IP、Bot QQ、密码、Token、数据库或服务器配置快照后，
-再创建提交。
-
 ## 9. 迁移服务器
 
 迁移时不需要回填旧日志。标准流程：
@@ -283,8 +255,9 @@ git check-ignore -v data/webconsole.db
 5. 保证两边 SQLite 和 spool 路径一致。
 6. 启动 WebConsole，等待 `/readyz`。
 7. 启动 HakuBot。
-8. 安装 WebConsole systemd、Nginx、HTTPS 和 Basic Auth。
-9. 验证公网 54321 可达、54322 不可达、Bot 在线状态和实际事件响应。
+8. 安装 WebConsole systemd，以及 Nginx 子域名站点、证书和 Basic Auth。
+9. 把域名解析到新服务器，验证 HTTPS 和认证可用、`127.0.0.1:54322` 不可从公网访问、
+   Bot 在线状态和实际事件响应正常。
 
 数据库无需从旧服务器复制时，新实例会从空 schema 开始，不读取或回填
 `output.log`。

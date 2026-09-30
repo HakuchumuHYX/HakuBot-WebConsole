@@ -7,13 +7,8 @@
   <title>系统与事件响应控制台</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <script>
-    (function() {
-      const saved = localStorage.getItem("webconsole_theme");
-      const theme = saved || "dark";
-      document.documentElement.setAttribute("data-theme", theme);
-    })();
-  </script>
+  <!-- Loaded synchronously so the saved theme applies before first paint. -->
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -302,6 +297,7 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
           </div>
           <strong id="record-count" class="font-heading">—</strong>
+          <small id="record-range" class="storage-card-note">—</small>
         </article>
       </div>
 
@@ -313,6 +309,7 @@
           </div>
           <h2>按时间清理日志与回收空间</h2>
           <p class="muted">仅安全清理过期事件响应及系统诊断日志；绝不会删除 Bot 当前状态或待导入的 spool 临时数据。</p>
+          <p id="retention-policy" class="muted">—</p>
         </div>
 
         <div class="cleanup-form-grid">

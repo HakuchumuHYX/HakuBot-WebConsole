@@ -40,83 +40,86 @@ func NewManager(
 	}
 }
 
-type FileUsage struct {
-	Bytes   int64  `json:"bytes"`
-	Display string `json:"display"`
-}
-
+// Stats holds file sizes as human-readable strings and time ranges in GMT+8;
+// ranges are empty when the table has no rows.
 type Stats struct {
-	Database           FileUsage `json:"database"`
-	WAL                FileUsage `json:"wal"`
-	SHM                FileUsage `json:"shm"`
-	Spool              FileUsage `json:"spool"`
-	SpoolFiles         int64     `json:"spool_files"`
-	ResponseCount      int64     `json:"response_count"`
-	DiagnosticCount    int64     `json:"diagnostic_count"`
-	ResponseEarliest   string    `json:"response_earliest,omitempty"`
-	ResponseLatest     string    `json:"response_latest,omitempty"`
-	DiagnosticEarliest string    `json:"diagnostic_earliest,omitempty"`
-	DiagnosticLatest   string    `json:"diagnostic_latest,omitempty"`
-	RetentionDays      int       `json:"retention_days"`
+	Database           string `json:"database"`
+	WAL                string `json:"wal"`
+	SHM                string `json:"shm"`
+	Spool              string `json:"spool"`
+	SpoolFiles         int64  `json:"spool_files"`
+	ResponseCount      int64  `json:"response_count"`
+	DiagnosticCount    int64  `json:"diagnostic_count"`
+	ResponseEarliest   string `json:"response_earliest"`
+	ResponseLatest     string `json:"response_latest"`
+	DiagnosticEarliest string `json:"diagnostic_earliest"`
+	DiagnosticLatest   string `json:"diagnostic_latest"`
+	RetentionDays      int    `json:"retention_days"`
 }
 
 type Preview struct {
-	CutoffDisplay             string `json:"cutoff_display"`
-	ResponseCount             int64  `json:"response_count"`
-	DiagnosticCount           int64  `json:"diagnostic_count"`
-	CurrentFreePages          int64  `json:"current_free_pages"`
-	EstimatedReclaimablePages int64  `json:"estimated_reclaimable_pages"`
+	CutoffDisplay   string `json:"cutoff_display"`
+	ResponseCount   int64  `json:"response_count"`
+	DiagnosticCount int64  `json:"diagnostic_count"`
 }
 
 type CleanupResult struct {
 	CutoffDisplay      string `json:"cutoff_display"`
 	ResponsesDeleted   int64  `json:"responses_deleted"`
 	DiagnosticsDeleted int64  `json:"diagnostics_deleted"`
-	Before             Stats  `json:"before"`
-	After              Stats  `json:"after"`
-}
-
-type ReclaimResult struct {
-	Before Stats `json:"before"`
-	After  Stats `json:"after"`
 }
 
 func (m *Manager) Stats(ctx context.Context) (Stats, error) {
 	result := Stats{
-		Database:      fileUsage(m.databasePath),
-		WAL:           fileUsage(m.databasePath + "-wal"),
-		SHM:           fileUsage(m.databasePath + "-shm"),
+		Database:      fileSize(m.databasePath),
+		WAL:           fileSize(m.databasePath + "-wal"),
+		SHM:           fileSize(m.databasePath + "-shm"),
 		RetentionDays: m.retentionDays,
 	}
 	spoolBytes, spoolFiles, err := directoryUsage(m.spoolPath)
 	if err != nil {
 		return Stats{}, fmt.Errorf("inspect spool: %w", err)
 	}
-	result.Spool = usage(spoolBytes)
+	result.Spool = humanBytes(spoolBytes)
 	result.SpoolFiles = spoolFiles
-	if err := m.db.QueryRowContext(
-		ctx,
-		"SELECT COUNT(*), MIN(started_at_ms), MAX(started_at_ms) "+
-			"FROM response_events",
-	).Scan(
-		&result.ResponseCount,
-		newDisplayScanner(&result.ResponseEarliest),
-		newDisplayScanner(&result.ResponseLatest),
-	); err != nil {
-		return Stats{}, fmt.Errorf("count response events: %w", err)
+	result.ResponseCount, result.ResponseEarliest, result.ResponseLatest, err =
+		m.tableRange(ctx, "response_events", "started_at_ms")
+	if err != nil {
+		return Stats{}, err
 	}
-	if err := m.db.QueryRowContext(
-		ctx,
-		"SELECT COUNT(*), MIN(created_at_ms), MAX(created_at_ms) "+
-			"FROM diagnostic_logs",
-	).Scan(
-		&result.DiagnosticCount,
-		newDisplayScanner(&result.DiagnosticEarliest),
-		newDisplayScanner(&result.DiagnosticLatest),
-	); err != nil {
-		return Stats{}, fmt.Errorf("count diagnostic logs: %w", err)
+	result.DiagnosticCount, result.DiagnosticEarliest, result.DiagnosticLatest, err =
+		m.tableRange(ctx, "diagnostic_logs", "created_at_ms")
+	if err != nil {
+		return Stats{}, err
 	}
 	return result, nil
+}
+
+func (m *Manager) tableRange(
+	ctx context.Context,
+	table, timestampColumn string,
+) (int64, string, string, error) {
+	var count int64
+	var earliest, latest sql.NullInt64
+	err := m.db.QueryRowContext(
+		ctx,
+		fmt.Sprintf(
+			"SELECT COUNT(*), MIN(%s), MAX(%s) FROM %s",
+			timestampColumn,
+			timestampColumn,
+			table,
+		),
+	).Scan(&count, &earliest, &latest)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("count %s: %w", table, err)
+	}
+	if count == 0 {
+		return 0, "", "", nil
+	}
+	return count,
+		timefmt.FormatMilliseconds(earliest.Int64),
+		timefmt.FormatMilliseconds(latest.Int64),
+		nil
 }
 
 func (m *Manager) Preview(
@@ -127,8 +130,7 @@ func (m *Manager) Preview(
 		return Preview{}, ErrFutureCutoff
 	}
 	cutoffMS := cutoff.UnixMilli()
-	var preview Preview
-	preview.CutoffDisplay = timefmt.FormatTime(cutoff)
+	preview := Preview{CutoffDisplay: timefmt.FormatTime(cutoff)}
 	if err := m.db.QueryRowContext(
 		ctx,
 		"SELECT COUNT(*) FROM response_events WHERE started_at_ms < ?",
@@ -143,32 +145,6 @@ func (m *Manager) Preview(
 	).Scan(&preview.DiagnosticCount); err != nil {
 		return Preview{}, err
 	}
-	if err := m.db.QueryRowContext(
-		ctx,
-		"PRAGMA freelist_count",
-	).Scan(&preview.CurrentFreePages); err != nil {
-		return Preview{}, err
-	}
-	var totalRows int64
-	if err := m.db.QueryRowContext(
-		ctx,
-		"SELECT (SELECT COUNT(*) FROM response_events) + "+
-			"(SELECT COUNT(*) FROM diagnostic_logs)",
-	).Scan(&totalRows); err != nil {
-		return Preview{}, err
-	}
-	if totalRows > 0 {
-		var pageCount int64
-		if err := m.db.QueryRowContext(
-			ctx,
-			"PRAGMA page_count",
-		).Scan(&pageCount); err != nil {
-			return Preview{}, err
-		}
-		deleting := preview.ResponseCount + preview.DiagnosticCount
-		preview.EstimatedReclaimablePages =
-			(pageCount - preview.CurrentFreePages) * deleting / totalRows
-	}
 	return preview, nil
 }
 
@@ -182,10 +158,6 @@ func (m *Manager) Cleanup(
 	defer m.maintenance.Unlock()
 	if cutoff.After(time.Now()) {
 		return CleanupResult{}, ErrFutureCutoff
-	}
-	before, err := m.Stats(ctx)
-	if err != nil {
-		return CleanupResult{}, err
 	}
 	cutoffMS := cutoff.UnixMilli()
 	responses, err := m.deleteBatches(
@@ -209,48 +181,29 @@ func (m *Manager) Cleanup(
 	if err := m.reclaimLocked(ctx); err != nil {
 		return CleanupResult{}, err
 	}
-	after, err := m.Stats(ctx)
-	if err != nil {
-		return CleanupResult{}, err
-	}
 	return CleanupResult{
 		CutoffDisplay:      timefmt.FormatTime(cutoff),
 		ResponsesDeleted:   responses,
 		DiagnosticsDeleted: diagnostics,
-		Before:             before,
-		After:              after,
 	}, nil
 }
 
-func (m *Manager) Reclaim(ctx context.Context) (ReclaimResult, error) {
+func (m *Manager) Reclaim(ctx context.Context) error {
 	if !m.maintenance.TryLock() {
-		return ReclaimResult{}, ErrBusy
+		return ErrBusy
 	}
 	defer m.maintenance.Unlock()
-	before, err := m.Stats(ctx)
-	if err != nil {
-		return ReclaimResult{}, err
-	}
-	if err := m.reclaimLocked(ctx); err != nil {
-		return ReclaimResult{}, err
-	}
-	after, err := m.Stats(ctx)
-	if err != nil {
-		return ReclaimResult{}, err
-	}
-	return ReclaimResult{Before: before, After: after}, nil
+	return m.reclaimLocked(ctx)
 }
 
+// RunAutomaticRetention deletes records older than retention_days; callers
+// only schedule it when retention is enabled.
 func (m *Manager) RunAutomaticRetention(
 	ctx context.Context,
 	now time.Time,
-) (CleanupResult, bool, error) {
-	if m.retentionDays <= 0 {
-		return CleanupResult{}, false, nil
-	}
+) (CleanupResult, error) {
 	cutoff := now.In(timefmt.Location).AddDate(0, 0, -m.retentionDays)
-	result, err := m.Cleanup(ctx, cutoff)
-	return result, true, err
+	return m.Cleanup(ctx, cutoff)
 }
 
 func NextAutomaticRun(now time.Time) time.Time {
@@ -324,16 +277,13 @@ func (m *Manager) reclaimLocked(ctx context.Context) error {
 	return nil
 }
 
-func usage(bytes int64) FileUsage {
-	return FileUsage{Bytes: bytes, Display: humanBytes(bytes)}
-}
-
-func fileUsage(path string) FileUsage {
+// fileSize reports a missing file (e.g. no WAL yet) as zero.
+func fileSize(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
-		return usage(0)
+		return humanBytes(0)
 	}
-	return usage(info.Size())
+	return humanBytes(info.Size())
 }
 
 func directoryUsage(path string) (int64, int64, error) {
@@ -378,30 +328,4 @@ func humanBytes(value int64) string {
 		float64(value)/float64(divisor),
 		"KMGTPE"[exponent],
 	)
-}
-
-type displayScanner struct {
-	target *string
-}
-
-func newDisplayScanner(target *string) *displayScanner {
-	return &displayScanner{target: target}
-}
-
-func (s *displayScanner) Scan(value any) error {
-	if value == nil {
-		*s.target = ""
-		return nil
-	}
-	var milliseconds int64
-	switch typed := value.(type) {
-	case int64:
-		milliseconds = typed
-	case int:
-		milliseconds = int64(typed)
-	default:
-		return fmt.Errorf("unexpected timestamp type %T", value)
-	}
-	*s.target = timefmt.FormatMilliseconds(milliseconds)
-	return nil
 }

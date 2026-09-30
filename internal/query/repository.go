@@ -3,7 +3,6 @@ package query
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -33,24 +32,18 @@ type EventFilters struct {
 }
 
 type EventSummary struct {
-	ID                 int64  `json:"id"`
-	TimeDisplay        string `json:"time_display"`
-	Status             string `json:"status"`
-	PluginName         string `json:"plugin_name,omitempty"`
-	ModuleName         string `json:"module_name,omitempty"`
-	GroupID            string `json:"group_id,omitempty"`
-	UserID             string `json:"user_id,omitempty"`
-	RequestSummary     string `json:"request_summary"`
-	ResponseSummary    string `json:"response_summary"`
-	DurationMS         *int64 `json:"duration_ms,omitempty"`
-	SendCount          int64  `json:"send_count"`
-	SendSuccessCount   int64  `json:"send_success_count"`
-	SendFailureCount   int64  `json:"send_failure_count"`
-	MaxLogLevel        string `json:"max_log_level,omitempty"`
-	ErrorType          string `json:"error_type,omitempty"`
-	ErrorMessage       string `json:"error_message,omitempty"`
-	HasFullDiagnostics bool   `json:"has_full_diagnostics"`
-	startedAtMS        int64
+	ID              int64  `json:"id"`
+	TimeDisplay     string `json:"time_display"`
+	Status          string `json:"status"`
+	PluginName      string `json:"plugin_name,omitempty"`
+	ModuleName      string `json:"module_name,omitempty"`
+	GroupID         string `json:"group_id,omitempty"`
+	UserID          string `json:"user_id,omitempty"`
+	RequestSummary  string `json:"request_summary"`
+	ResponseSummary string `json:"response_summary"`
+	DurationMS      *int64 `json:"duration_ms,omitempty"`
+	MaxLogLevel     string `json:"max_log_level,omitempty"`
+	startedAtMS     int64
 }
 
 type EventPage struct {
@@ -68,10 +61,7 @@ func (r *Repository) ListEvents(
 		       COALESCE(plugin_name, ''), COALESCE(module_name, ''),
 		       COALESCE(group_id, ''), COALESCE(user_id, ''),
 		       COALESCE(request_summary, ''), COALESCE(response_summary, ''),
-		       duration_ms, send_count, send_success_count,
-		       send_failure_count, COALESCE(max_log_level, ''),
-		       COALESCE(error_type, ''), COALESCE(error_message, ''),
-		       has_full_diagnostics
+		       duration_ms, COALESCE(max_log_level, '')
 		FROM response_events` + where + `
 		ORDER BY started_at_ms DESC, id DESC
 		LIMIT ?`
@@ -86,7 +76,6 @@ func (r *Repository) ListEvents(
 	for rows.Next() {
 		var item EventSummary
 		var duration sql.NullInt64
-		var full int
 		if err := rows.Scan(
 			&item.ID,
 			&item.startedAtMS,
@@ -98,21 +87,13 @@ func (r *Repository) ListEvents(
 			&item.RequestSummary,
 			&item.ResponseSummary,
 			&duration,
-			&item.SendCount,
-			&item.SendSuccessCount,
-			&item.SendFailureCount,
 			&item.MaxLogLevel,
-			&item.ErrorType,
-			&item.ErrorMessage,
-			&full,
 		); err != nil {
 			return EventPage{}, fmt.Errorf("scan event: %w", err)
 		}
 		if duration.Valid {
-			value := duration.Int64
-			item.DurationMS = &value
+			item.DurationMS = &duration.Int64
 		}
-		item.HasFullDiagnostics = full == 1
 		item.TimeDisplay = timefmt.FormatMilliseconds(item.startedAtMS)
 		items = append(items, item)
 	}
@@ -171,15 +152,27 @@ func buildEventWhere(filters EventFilters) (string, []any) {
 }
 
 type EventDetail struct {
-	EventSummary
-	RunID           string `json:"run_id"`
-	PluginID        string `json:"plugin_id,omitempty"`
-	MatcherType     string `json:"matcher_type,omitempty"`
-	MatcherLine     *int64 `json:"matcher_lineno,omitempty"`
-	BotID           string `json:"bot_id,omitempty"`
-	EventName       string `json:"event_name,omitempty"`
-	SourceMessageID string `json:"source_message_id,omitempty"`
-	FinishedDisplay string `json:"finished_display,omitempty"`
+	TimeDisplay        string `json:"time_display"`
+	FinishedDisplay    string `json:"finished_display,omitempty"`
+	Status             string `json:"status"`
+	PluginName         string `json:"plugin_name,omitempty"`
+	ModuleName         string `json:"module_name,omitempty"`
+	MatcherType        string `json:"matcher_type,omitempty"`
+	MatcherLine        *int64 `json:"matcher_lineno,omitempty"`
+	EventName          string `json:"event_name,omitempty"`
+	GroupID            string `json:"group_id,omitempty"`
+	UserID             string `json:"user_id,omitempty"`
+	SourceMessageID    string `json:"source_message_id,omitempty"`
+	RunID              string `json:"run_id"`
+	DurationMS         *int64 `json:"duration_ms,omitempty"`
+	SendCount          int64  `json:"send_count"`
+	SendSuccessCount   int64  `json:"send_success_count"`
+	SendFailureCount   int64  `json:"send_failure_count"`
+	RequestSummary     string `json:"request_summary"`
+	ResponseSummary    string `json:"response_summary"`
+	ErrorType          string `json:"error_type,omitempty"`
+	ErrorMessage       string `json:"error_message,omitempty"`
+	HasFullDiagnostics bool   `json:"has_full_diagnostics"`
 }
 
 func (r *Repository) GetEvent(
@@ -187,69 +180,59 @@ func (r *Repository) GetEvent(
 	id int64,
 ) (EventDetail, error) {
 	var detail EventDetail
+	var startedAtMS int64
 	var duration, matcherLine, finished sql.NullInt64
-	var full int
 	err := r.db.QueryRowContext(
 		ctx,
-		`SELECT id, run_id, started_at_ms, finished_at_ms, status,
-		        COALESCE(plugin_name, ''), COALESCE(plugin_id, ''),
-		        COALESCE(module_name, ''), COALESCE(matcher_type, ''),
-		        matcher_lineno, COALESCE(bot_id, ''),
+		`SELECT started_at_ms, finished_at_ms, status,
+		        COALESCE(plugin_name, ''), COALESCE(module_name, ''),
+		        COALESCE(matcher_type, ''), matcher_lineno,
 		        COALESCE(event_name, ''), COALESCE(group_id, ''),
 		        COALESCE(user_id, ''), COALESCE(source_message_id, ''),
-		        COALESCE(request_summary, ''),
-		        COALESCE(response_summary, ''), duration_ms,
+		        run_id, duration_ms,
 		        send_count, send_success_count, send_failure_count,
-		        COALESCE(max_log_level, ''), COALESCE(error_type, ''),
-		        COALESCE(error_message, ''), has_full_diagnostics
+		        COALESCE(request_summary, ''),
+		        COALESCE(response_summary, ''),
+		        COALESCE(error_type, ''), COALESCE(error_message, ''),
+		        has_full_diagnostics = 1
 		   FROM response_events WHERE id = ?`,
 		id,
 	).Scan(
-		&detail.ID,
-		&detail.RunID,
-		&detail.startedAtMS,
+		&startedAtMS,
 		&finished,
 		&detail.Status,
 		&detail.PluginName,
-		&detail.PluginID,
 		&detail.ModuleName,
 		&detail.MatcherType,
 		&matcherLine,
-		&detail.BotID,
 		&detail.EventName,
 		&detail.GroupID,
 		&detail.UserID,
 		&detail.SourceMessageID,
-		&detail.RequestSummary,
-		&detail.ResponseSummary,
+		&detail.RunID,
 		&duration,
 		&detail.SendCount,
 		&detail.SendSuccessCount,
 		&detail.SendFailureCount,
-		&detail.MaxLogLevel,
+		&detail.RequestSummary,
+		&detail.ResponseSummary,
 		&detail.ErrorType,
 		&detail.ErrorMessage,
-		&full,
+		&detail.HasFullDiagnostics,
 	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return EventDetail{}, sql.ErrNoRows
-	}
 	if err != nil {
 		return EventDetail{}, fmt.Errorf("get event: %w", err)
 	}
-	detail.TimeDisplay = timefmt.FormatMilliseconds(detail.startedAtMS)
+	detail.TimeDisplay = timefmt.FormatMilliseconds(startedAtMS)
 	if finished.Valid {
 		detail.FinishedDisplay = timefmt.FormatMilliseconds(finished.Int64)
 	}
 	if duration.Valid {
-		value := duration.Int64
-		detail.DurationMS = &value
+		detail.DurationMS = &duration.Int64
 	}
 	if matcherLine.Valid {
-		value := matcherLine.Int64
-		detail.MatcherLine = &value
+		detail.MatcherLine = &matcherLine.Int64
 	}
-	detail.HasFullDiagnostics = full == 1
 	return detail, nil
 }
 
@@ -363,9 +346,8 @@ func distinctStrings(
 }
 
 type BotStatus struct {
-	BotID   string `json:"bot_id,omitempty"`
-	Adapter string `json:"adapter,omitempty"`
-	Online  bool   `json:"online"`
+	BotID  string `json:"bot_id"`
+	Online bool   `json:"online"`
 }
 
 func (r *Repository) BotStatus(
@@ -374,7 +356,7 @@ func (r *Repository) BotStatus(
 ) ([]BotStatus, error) {
 	rows, err := r.db.QueryContext(
 		ctx,
-		`SELECT bot_id, adapter, connected, connection_started_at_ms,
+		`SELECT bot_id, connected, connection_started_at_ms,
 		        last_heartbeat_at_ms, heartbeat_online, heartbeat_good,
 		        collector_heartbeat_at_ms
 		   FROM bot_status ORDER BY bot_id`,
@@ -393,7 +375,6 @@ func (r *Repository) BotStatus(
 		var collectorHeartbeat int64
 		if err := rows.Scan(
 			&status.BotID,
-			&status.Adapter,
 			&connected,
 			&connectionStarted,
 			&heartbeatAt,
@@ -439,7 +420,6 @@ type DiagnosticSummary struct {
 	ModuleName     string `json:"module_name,omitempty"`
 	PluginName     string `json:"plugin_name,omitempty"`
 	MessageSummary string `json:"message_summary"`
-	RunID          string `json:"run_id,omitempty"`
 	createdAtMS    int64
 }
 
@@ -522,8 +502,7 @@ func (r *Repository) ListDiagnostics(
 		ctx,
 		`SELECT id, created_at_ms, level,
 		        COALESCE(logger_name, ''), COALESCE(module_name, ''),
-		        COALESCE(plugin_name, ''), message_summary,
-		        COALESCE(run_id, '')
+		        COALESCE(plugin_name, ''), message_summary
 		   FROM diagnostic_logs`+where+`
 		  ORDER BY created_at_ms DESC, id DESC LIMIT ?`,
 		args...,
@@ -544,7 +523,6 @@ func (r *Repository) ListDiagnostics(
 			&item.ModuleName,
 			&item.PluginName,
 			&item.MessageSummary,
-			&item.RunID,
 		); err != nil {
 			return DiagnosticPage{}, fmt.Errorf("scan diagnostic: %w", err)
 		}
@@ -574,25 +552,20 @@ type RawPayload struct {
 	FilenameStem string
 }
 
+// EventRawColumns maps each downloadable part of an event to its blob and
+// hash columns; the HTTP layer registers one route per key.
+var EventRawColumns = map[string][2]string{
+	"input":  {"request_raw_gzip", "request_raw_sha256"},
+	"output": {"response_raw_gzip", "response_raw_sha256"},
+	"logs":   {"logs_raw_gzip", "logs_raw_sha256"},
+}
+
 func (r *Repository) EventRaw(
 	ctx context.Context,
 	id int64,
 	part string,
 ) (RawPayload, error) {
-	var blobColumn, hashColumn string
-	switch part {
-	case "input":
-		blobColumn = "request_raw_gzip"
-		hashColumn = "request_raw_sha256"
-	case "output":
-		blobColumn = "response_raw_gzip"
-		hashColumn = "response_raw_sha256"
-	case "logs":
-		blobColumn = "logs_raw_gzip"
-		hashColumn = "logs_raw_sha256"
-	default:
-		return RawPayload{}, errors.New("invalid raw part")
-	}
+	blobColumn, hashColumn := EventRawColumns[part][0], EventRawColumns[part][1]
 	var payload RawPayload
 	var startedAtMS int64
 	err := r.db.QueryRowContext(

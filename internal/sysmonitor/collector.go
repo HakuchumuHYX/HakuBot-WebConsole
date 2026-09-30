@@ -120,11 +120,9 @@ func (c *Collector) sampleOnce() MetricSample {
 	if err != nil {
 		slog.Debug("read load stats failed", "error", err)
 	}
-	uptimeSec := readUptime()
 
 	sample := MetricSample{
 		TimestampMs:      now.UnixMilli(),
-		TimeDisplay:      timefmt.FormatTime(now),
 		CPUPercent:       cpuPct,
 		MemoryUsedBytes:  mem.used,
 		MemoryTotalBytes: mem.total,
@@ -137,7 +135,6 @@ func (c *Collector) sampleOnce() MetricSample {
 		Load1:            load.load1,
 		Load5:            load.load5,
 		Load15:           load.load15,
-		UptimeSeconds:    uptimeSec,
 		NetRxBytesPerSec: rxRate,
 		NetTxBytesPerSec: txRate,
 		ProcessCount:     load.processes,
@@ -145,7 +142,6 @@ func (c *Collector) sampleOnce() MetricSample {
 
 	var memRuntime runtime.MemStats
 	runtime.ReadMemStats(&memRuntime)
-	procUptimeSec := int64(time.Since(c.startTime).Seconds())
 
 	c.mu.Lock()
 	c.status = SystemStatus{
@@ -155,10 +151,8 @@ func (c *Collector) sampleOnce() MetricSample {
 		Arch:              runtime.GOARCH,
 		CPUModel:          c.cpuModel,
 		CPUCores:          runtime.NumCPU(),
-		SystemUptimeDesc:  formatDuration(uptimeSec),
-		ProcessUptimeDesc: formatDuration(procUptimeSec),
-		SystemUptimeSec:   uptimeSec,
-		ProcessUptimeSec:  procUptimeSec,
+		SystemUptimeDesc:  formatDuration(readUptime()),
+		ProcessUptimeDesc: formatDuration(int64(time.Since(c.startTime).Seconds())),
 		Goroutines:        runtime.NumGoroutine(),
 		GoHeapAllocBytes:  memRuntime.Alloc,
 		Current:           sample,
@@ -179,17 +173,13 @@ func (c *Collector) writeRow(ctx context.Context, latest MetricSample) {
 		ctx,
 		`INSERT OR REPLACE INTO host_metrics (
 			timestamp_ms, cpu_avg, cpu_max, memory_percent,
-			memory_used_bytes, memory_total_bytes, disk_percent, load1,
-			net_rx_bytes_per_sec, net_tx_bytes_per_sec
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			memory_used_bytes, net_rx_bytes_per_sec, net_tx_bytes_per_sec
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		latest.TimestampMs,
 		cpuSum/float64(len(c.pendingCPU)),
 		cpuMax,
 		latest.MemoryPercent,
 		int64(latest.MemoryUsedBytes),
-		int64(latest.MemoryTotalBytes),
-		latest.DiskPercent,
-		latest.Load1,
 		latest.NetRxBytesPerSec,
 		latest.NetTxBytesPerSec,
 	)
@@ -206,21 +196,16 @@ func (c *Collector) Status() SystemStatus {
 
 type HistoryPoint struct {
 	TimestampMs      int64   `json:"timestamp_ms"`
-	TimeLabel        string  `json:"time_label"`
 	TimeDisplay      string  `json:"time_display"`
 	CPUPercent       float64 `json:"cpu_percent"`
 	CPUMax           float64 `json:"cpu_max"`
 	MemoryPercent    float64 `json:"memory_percent"`
-	MemoryUsedBytes  uint64  `json:"memory_used_bytes"`
-	MemoryTotalBytes uint64  `json:"memory_total_bytes"`
-	DiskPercent      float64 `json:"disk_percent"`
-	Load1            float64 `json:"load1"`
+	MemoryUsedBytes  int64   `json:"memory_used_bytes"`
 	NetRxBytesPerSec float64 `json:"net_rx_bytes_per_sec"`
 	NetTxBytesPerSec float64 `json:"net_tx_bytes_per_sec"`
 }
 
 type HistoryResponse struct {
-	Window string         `json:"window"`
 	FromMs int64          `json:"from_ms"`
 	ToMs   int64          `json:"to_ms"`
 	Points []HistoryPoint `json:"points"`
@@ -243,13 +228,11 @@ func (c *Collector) History(
 	case "7d":
 		duration, bucketMs = 7*24*time.Hour, 5_040_000
 	default:
-		window = "1h"
 		duration, bucketMs = time.Hour, 30_000
 	}
 
 	now := time.Now()
 	response := HistoryResponse{
-		Window: window,
 		FromMs: now.Add(-duration).UnixMilli(),
 		ToMs:   now.UnixMilli(),
 		Points: make([]HistoryPoint, 0, 128),
@@ -260,8 +243,6 @@ func (c *Collector) History(
 		        ROUND(AVG(cpu_avg), 2), ROUND(MAX(cpu_max), 2),
 		        ROUND(AVG(memory_percent), 2),
 		        CAST(AVG(memory_used_bytes) AS INTEGER),
-		        CAST(AVG(memory_total_bytes) AS INTEGER),
-		        ROUND(AVG(disk_percent), 2), ROUND(AVG(load1), 2),
 		        ROUND(AVG(net_rx_bytes_per_sec), 2),
 		        ROUND(AVG(net_tx_bytes_per_sec), 2)
 		   FROM host_metrics
@@ -279,30 +260,18 @@ func (c *Collector) History(
 
 	for rows.Next() {
 		var point HistoryPoint
-		var memUsed, memTotal int64
 		if err := rows.Scan(
 			&point.TimestampMs,
 			&point.CPUPercent,
 			&point.CPUMax,
 			&point.MemoryPercent,
-			&memUsed,
-			&memTotal,
-			&point.DiskPercent,
-			&point.Load1,
+			&point.MemoryUsedBytes,
 			&point.NetRxBytesPerSec,
 			&point.NetTxBytesPerSec,
 		); err != nil {
 			return HistoryResponse{}, err
 		}
-		point.MemoryUsedBytes = uint64(memUsed)
-		point.MemoryTotalBytes = uint64(memTotal)
-		local := time.UnixMilli(point.TimestampMs).In(timefmt.Location)
-		point.TimeDisplay = timefmt.FormatTime(local)
-		if window == "24h" || window == "7d" {
-			point.TimeLabel = local.Format("01-02 15:04")
-		} else {
-			point.TimeLabel = local.Format("15:04:05")
-		}
+		point.TimeDisplay = timefmt.FormatMilliseconds(point.TimestampMs)
 		response.Points = append(response.Points, point)
 	}
 	return response, rows.Err()

@@ -87,9 +87,6 @@ CREATE TABLE IF NOT EXISTS host_metrics (
     cpu_max REAL NOT NULL,
     memory_percent REAL NOT NULL,
     memory_used_bytes INTEGER NOT NULL,
-    memory_total_bytes INTEGER NOT NULL,
-    disk_percent REAL NOT NULL,
-    load1 REAL NOT NULL,
     net_rx_bytes_per_sec REAL NOT NULL,
     net_tx_bytes_per_sec REAL NOT NULL
 ) STRICT;
@@ -107,5 +104,3 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_created
     ON diagnostic_logs(created_at_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_level_created
     ON diagnostic_logs(level, created_at_ms DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_run
-    ON diagnostic_logs(run_id);

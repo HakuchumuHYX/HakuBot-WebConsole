@@ -134,6 +134,13 @@ async function loadEvents({ append = false } = {}) {
     const row = document.createElement("tr");
     const status = document.createElement("td");
     status.append(statusBadge(item.status));
+    // A success may still carry WARNING logs; flag it without changing the status.
+    if (item.status === "success" && item.max_log_level === "WARNING") {
+      const warning = document.createElement("span");
+      warning.className = "badge WARNING";
+      warning.textContent = "警告";
+      status.append(warning);
+    }
     row.append(
       textCell(item.time_display),
       status,
@@ -201,6 +208,7 @@ async function showEventDetail(id) {
   const fields = {
     "开始时间（GMT+8）": detail.time_display,
     "结束时间（GMT+8）": detail.finished_display,
+    "事件类型": detail.event_name,
     "模块": detail.module_name,
     "Matcher": `${detail.matcher_type || "—"}${detail.matcher_lineno ? `:${detail.matcher_lineno}` : ""}`,
     "群 / 用户": `${detail.group_id || "私聊"} / ${detail.user_id || "—"}`,
@@ -297,7 +305,9 @@ async function loadBotStatus() {
   const data = await (await api("/api/bot-status")).json();
   const element = $("#bot-status");
   element.className = `status ${data.online ? "online" : "offline"}`;
-  element.querySelector(".status-text").textContent = data.online ? "在线" : "离线";
+  const label = data.online ? "在线" : "离线";
+  const ids = data.bots.map(bot => bot.bot_id).join(", ");
+  element.querySelector(".status-text").textContent = ids ? `QQ ${ids} · ${label}` : label;
 }
 
 async function loadDiagnostics({ append = false } = {}) {
@@ -370,10 +380,16 @@ function startClock() {
 
 async function loadStorage() {
   const data = await (await api("/api/storage")).json();
-  $("#size-db").textContent = data.database.display;
-  $("#size-wal").textContent = `${data.wal.display} / ${data.shm.display}`;
-  $("#size-spool").textContent = `${data.spool.display} · ${data.spool_files} 个文件`;
+  $("#size-db").textContent = data.database;
+  $("#size-wal").textContent = `${data.wal} / ${data.shm}`;
+  $("#size-spool").textContent = `${data.spool} · ${data.spool_files} 个文件`;
   $("#record-count").textContent = `${data.response_count} 响应 / ${data.diagnostic_count} 诊断`;
+  const range = (earliest, latest) => earliest ? `${earliest} 至 ${latest}` : "无记录";
+  $("#record-range").textContent =
+    `响应：${range(data.response_earliest, data.response_latest)}\n诊断：${range(data.diagnostic_earliest, data.diagnostic_latest)}`;
+  $("#retention-policy").textContent = data.retention_days > 0
+    ? `自动保留最近 ${data.retention_days} 天，每天 04:15（GMT+8）清理更早的记录。`
+    : "自动保留已关闭，只能手动清理。";
 }
 
 async function loadSystemStatus() {

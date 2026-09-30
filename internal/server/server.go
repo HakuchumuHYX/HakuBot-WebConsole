@@ -59,10 +59,12 @@ func (s *Server) routes(static http.Handler) {
 	s.mux.HandleFunc("GET /readyz", s.ready)
 	s.mux.HandleFunc("GET /api/events", s.listEvents)
 	s.mux.HandleFunc("GET /api/events/{id}", s.getEvent)
-	s.mux.HandleFunc(
-		"GET /api/events/{id}/raw/{part}",
-		s.downloadEventRaw,
-	)
+	for part := range query.EventRawColumns {
+		s.mux.HandleFunc(
+			"GET /api/events/{id}/raw/"+part,
+			s.downloadEventRaw(part),
+		)
+	}
 	s.mux.HandleFunc("GET /api/filters", s.filters)
 	s.mux.HandleFunc("GET /api/stats", s.stats)
 	s.mux.HandleFunc("GET /api/bot-status", s.botStatus)
@@ -82,17 +84,17 @@ func (s *Server) routes(static http.Handler) {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		// Nginx only adds HSTS; every other response header lives here.
 		header := writer.Header()
 		header.Set("Cache-Control", "no-store")
-		header.Set("Pragma", "no-cache")
 		header.Set("X-Content-Type-Options", "nosniff")
-		header.Set("X-Frame-Options", "DENY")
 		header.Set("Referrer-Policy", "no-referrer")
+		// style-src needs 'unsafe-inline' for style attributes in the markup
+		// and the generated chart SVG.
 		header.Set(
 			"Content-Security-Policy",
-			"default-src 'self'; connect-src 'self'; "+
-				"img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
-				"script-src 'self' 'unsafe-inline'; "+
+			"default-src 'self'; img-src 'self' data:; "+
+				"style-src 'self' 'unsafe-inline'; "+
 				"frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 		)
 		next.ServeHTTP(writer, request)
@@ -146,30 +148,24 @@ func (s *Server) getEvent(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, event)
 }
 
-func (s *Server) downloadEventRaw(
-	writer http.ResponseWriter,
-	request *http.Request,
-) {
-	id, err := positiveID(request.PathValue("id"))
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid event id")
-		return
+func (s *Server) downloadEventRaw(part string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		id, err := positiveID(request.PathValue("id"))
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid event id")
+			return
+		}
+		payload, err := s.repository.EventRaw(request.Context(), id, part)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(writer, http.StatusNotFound, "raw event data not found")
+			return
+		}
+		if err != nil {
+			s.internalError(writer, "read event raw data", err)
+			return
+		}
+		s.serveVerifiedPayload(writer, payload, true)
 	}
-	part := request.PathValue("part")
-	if part != "input" && part != "output" && part != "logs" {
-		writeError(writer, http.StatusBadRequest, "invalid raw part")
-		return
-	}
-	payload, err := s.repository.EventRaw(request.Context(), id, part)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(writer, http.StatusNotFound, "raw event data not found")
-		return
-	}
-	if err != nil {
-		s.internalError(writer, "read event raw data", err)
-		return
-	}
-	s.serveVerifiedPayload(writer, payload, true)
 }
 
 func (s *Server) downloadDiagnostic(
@@ -410,7 +406,7 @@ func (s *Server) reclaim(
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := s.storage.Reclaim(request.Context())
+	err := s.storage.Reclaim(request.Context())
 	if errors.Is(err, storage.ErrBusy) {
 		writeError(writer, http.StatusConflict, err.Error())
 		return
@@ -420,7 +416,7 @@ func (s *Server) reclaim(
 		return
 	}
 	slog.Info("webconsole incremental storage reclaim completed")
-	writeJSON(writer, http.StatusOK, result)
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) parseCutoffMutation(
