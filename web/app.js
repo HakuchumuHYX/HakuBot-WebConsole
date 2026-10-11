@@ -1,53 +1,71 @@
 "use strict";
 
 const state = {
+  events: [],
   eventCursor: "",
-  diagnosticCursor: "",
+  eventSignature: "",
+  knownEventIds: new Set(),
+  diagnosticSignature: "",
+  pulseSignature: "",
+  openIssues: new Set(),
   previewCutoff: "",
-  refreshTimer: null,
-  clockTimer: null,
   refreshInFlight: false,
   refreshErrorShown: false,
   systemWindow: "1h",
-  systemHistoryData: null,
+  systemHistory: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+function el(tag, className = "", text = "") {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text) element.textContent = text;
+  return element;
+}
+
 function toast(message) {
   const element = $("#toast");
-  $("#toast-message").textContent = message;
-  element.classList.remove("hidden");
+  element.textContent = message;
+  element.hidden = false;
   clearTimeout(element._timer);
-  element._timer = setTimeout(() => element.classList.add("hidden"), 4500);
+  element._timer = setTimeout(() => { element.hidden = true; }, 4500);
 }
 
 function formatBytes(bytes, decimals = 1) {
-  if (bytes === 0 || !bytes) return "0 B";
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i] || "B"}`;
+  if (!bytes) return "0 B";
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${parseFloat((bytes / 1024 ** i).toFixed(decimals))} ${sizes[i]}`;
+}
+
+function formatDuration(ms) {
+  if (ms == null) return "";
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    cache: "no-store",
-    ...options,
-  });
+  const response = await fetch(path, { credentials: "same-origin", cache: "no-store", ...options });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
-      const body = await response.json();
-      message = body.error || message;
+      message = (await response.json()).error || message;
     } catch (_) {}
     throw new Error(message);
   }
   return response;
 }
+
+async function mutation(path, body) {
+  return api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/* GMT+8 time helpers. The API speaks "YYYY-M-D HH:MM:SS" in GMT+8. */
 
 function gmt8Parts(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -59,244 +77,408 @@ function gmt8Parts(date = new Date()) {
   return Object.fromEntries(parts.map(({ type, value }) => [type, value]));
 }
 
-function gmt8NowDisplay() {
-  const p = gmt8Parts();
-  return `${Number(p.year)}-${Number(p.month)}-${Number(p.day)} ${p.hour}:${p.minute}:${p.second}`;
+function gmt8Date(date = new Date()) {
+  const p = gmt8Parts(date);
+  return `${Number(p.year)}-${Number(p.month)}-${Number(p.day)}`;
 }
 
+// Browsers drop ":00" seconds from datetime-local values, so seconds are optional.
 function inputToAPI(value) {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/);
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (!match) return "";
-  return `${match[1]}-${Number(match[2])}-${Number(match[3])} ${match[4]}:${match[5]}:${match[6]}`;
+  return `${match[1]}-${Number(match[2])}-${Number(match[3])} ${match[4]}:${match[5]}:${match[6] || "00"}`;
 }
 
 function partsToInput(parts) {
-  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}T${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}:${String(parts.second).padStart(2, "0")}`;
+  const pad = value => String(value).padStart(2, "0");
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
-function shiftedHours(hours, now = new Date()) {
-  return partsToInput(gmt8Parts(new Date(now.getTime() + hours * 3600000)));
+function hoursAgoAPI(hours) {
+  return inputToAPI(partsToInput(gmt8Parts(new Date(Date.now() - hours * 3600000))));
 }
 
-function setQuickRange(value) {
+function calendarMonthsAgo(months) {
+  const p = gmt8Parts();
+  const monthIndex = Number(p.month) - 1 - months;
+  const year = Number(p.year) + Math.floor(monthIndex / 12);
+  const month = ((monthIndex % 12) + 12) % 12;
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  return partsToInput({ ...p, year, month: month + 1, day: Math.min(Number(p.day), lastDay) });
+}
+
+function dayLabel(date) {
+  if (date === gmt8Date()) return "今天";
+  if (date === gmt8Date(new Date(Date.now() - 86400000))) return "昨天";
+  const [year, month, day] = date.split("-");
+  const label = `${month} 月 ${day} 日`;
+  return year === gmt8Date().split("-")[0] ? label : `${year} 年 ${label}`;
+}
+
+function relativeTime(ms) {
+  const minutes = Math.floor((Date.now() - ms) / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时前`;
+  return `${Math.floor(minutes / 1440)} 天前`;
+}
+
+const HOURS = { "1h": 1, "24h": 24, "7d": 168, "30d": 720 };
+const LEVEL_LABELS = { WARNING: "警告", ERROR: "错误", CRITICAL: "严重" };
+
+// Message segments arrive as "[image]" etc.; show them as small tokens.
+const SEGMENT_LABELS = {
+  image: "图片", at: "@", face: "表情", mface: "表情", record: "语音", video: "视频",
+  file: "文件", reply: "回复", forward: "合并转发", json: "卡片", xml: "卡片", poke: "戳一戳",
+};
+
+function messageContent(text) {
+  const fragment = document.createDocumentFragment();
+  let last = 0;
+  for (const match of text.matchAll(/\[([a-z]+)\]/g)) {
+    const label = SEGMENT_LABELS[match[1]];
+    if (!label) continue;
+    fragment.append(text.slice(last, match.index), el("span", "token", label));
+    last = match.index + match[0].length;
+  }
+  fragment.append(text.slice(last));
+  return fragment;
+}
+
+/* Response log */
+
+function eventParams() {
   const form = $("#event-filters");
-  if (!form || value === "custom") return;
-  const now = new Date();
-  const hours = { "1h": -1, "24h": -24, "7d": -168 }[value];
-  if (form.elements.from) form.elements.from.value = shiftedHours(hours, now);
-  if (form.elements.to) form.elements.to.value = partsToInput(gmt8Parts(now));
-}
-
-function filterParams(form, includeCursor = false) {
   const params = new URLSearchParams();
   for (const name of ["status", "group_id", "plugin"]) {
-    if (form.elements[name]?.value) params.set(name, form.elements[name].value);
+    if (form.elements[name].value) params.set(name, form.elements[name].value);
   }
-  const from = inputToAPI(form.elements.from?.value || "");
-  const to = inputToAPI(form.elements.to?.value || "");
-  if (from) params.set("from", from);
-  if (to) params.set("to", to);
-  params.set("limit", "50");
-  if (includeCursor && state.eventCursor) params.set("cursor", state.eventCursor);
+  const range = form.elements.quick_time.value;
+  if (range === "custom") {
+    const from = inputToAPI(form.elements.from.value);
+    const to = inputToAPI(form.elements.to.value);
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+  } else {
+    params.set("from", hoursAgoAPI(HOURS[range]));
+  }
   return params;
 }
 
-function textCell(value, className = "") {
-  const cell = document.createElement("td");
-  if (className) cell.className = className;
-  const str = value || "—";
-  cell.textContent = str;
-  cell.title = str;
-  return cell;
-}
-
-function statusBadge(status) {
-  const span = document.createElement("span");
-  span.className = `badge ${status}`;
-  span.textContent = status === "success" ? "成功" : "失败";
-  return span;
-}
-
-async function loadEvents({ append = false } = {}) {
-  const form = $("#event-filters");
-  if (!append && form.elements.quick_time.value !== "custom") {
-    setQuickRange(form.elements.quick_time.value);
+function exchange(input, reply) {
+  const nodes = [];
+  if (input) {
+    const chip = el("span", "msg-input");
+    chip.append(messageContent(input));
+    nodes.push(chip);
   }
-  const params = filterParams(form, append);
-  const [eventsResponse, statsResponse] = await Promise.all([
-    api(`/api/events?${params}`),
-    append ? Promise.resolve(null) : api(`/api/stats?${params}`),
-  ]);
-  const page = await eventsResponse.json();
-  const body = $("#event-rows");
-  if (!append) body.replaceChildren();
-  for (const item of page.items || []) {
-    const row = document.createElement("tr");
-    const status = document.createElement("td");
-    status.append(statusBadge(item.status));
-    // A success may still carry WARNING logs; flag it without changing the status.
-    if (item.status === "success" && item.max_log_level === "WARNING") {
-      const warning = document.createElement("span");
-      warning.className = "badge WARNING";
-      warning.textContent = "警告";
-      status.append(warning);
+  if (!reply) {
+    nodes.push(el("span", "msg-reply quiet", "没有发送回复"));
+  } else if (reply === input) {
+    nodes.push(el("span", "msg-reply quiet", "复读"));
+  } else {
+    const text = el("span", "msg-reply");
+    text.append(messageContent(reply));
+    nodes.push(text);
+  }
+  return nodes;
+}
+
+// A success may still carry WARNING logs; flag it without changing the status.
+function eventFlag(item) {
+  if (item.status === "failure") return "failure";
+  return item.max_log_level === "WARNING" ? "warning" : "";
+}
+
+// Anything this slow is worth noticing even when it succeeded.
+const SLOW_MS = 10000;
+
+function eventRow(item, fresh) {
+  const [, time] = item.time_display.split(" ");
+  const flag = eventFlag(item);
+  const row = el("button", `row event-grid ${flag}${fresh ? " fresh" : ""}`);
+  row.type = "button";
+
+  const message = el("span", "cell-msg");
+  if (flag) message.append(el("span", `tag ${flag}`, flag === "failure" ? "失败" : "警告"));
+  message.append(...exchange(item.request_summary, item.response_summary));
+
+  const duration = el("span", "cell-dur num", formatDuration(item.duration_ms));
+  if (item.duration_ms >= SLOW_MS) duration.classList.add("slow");
+
+  row.append(
+    el("span", "cell-time", time),
+    el("span", "cell-plugin", item.plugin_name || item.module_name || "未知插件"),
+    el("span", "cell-id", item.group_id || "私聊"),
+    el("span", "cell-id", item.user_id || "—"),
+    message,
+    duration,
+  );
+  row.addEventListener("click", () => showEventDetail(item.id).catch(error => toast(error.message)));
+  return row;
+}
+
+// Rows the previous render did not have flash once, so arrivals during the
+// 3-second refresh are visible; a fresh filter starts with nothing known.
+function renderEvents(flashNew) {
+  const list = $("#event-list");
+  list.replaceChildren();
+  let currentDay = "";
+  for (const item of state.events) {
+    const [date] = item.time_display.split(" ");
+    if (date !== currentDay) {
+      currentDay = date;
+      list.append(el("li", "day-row", dayLabel(date)));
     }
-    row.append(
-      textCell(item.time_display),
-      status,
-      textCell(item.plugin_name || item.module_name),
-      textCell(item.group_id ? `${item.group_id} / ${item.user_id || "—"}` : `私聊 / ${item.user_id || "—"}`),
-      textCell(item.request_summary, "summary"),
-      textCell(item.response_summary, "summary"),
-      textCell(item.duration_ms == null ? "—" : `${item.duration_ms} ms`),
-    );
-    row.addEventListener("click", () => showEventDetail(item.id));
-    body.append(row);
+    const row = el("li");
+    row.append(eventRow(item, flashNew && !state.knownEventIds.has(item.id)));
+    list.append(row);
   }
+  state.knownEventIds = new Set(state.events.map(item => item.id));
+  $("#event-empty").hidden = state.events.length > 0;
+  $("#load-more").hidden = !state.eventCursor;
+}
+
+function renderEventSummary(stats) {
+  const summary = $("#event-summary");
+  if (!stats.total) {
+    summary.textContent = "没有记录";
+    return;
+  }
+  summary.replaceChildren("共 ", el("b", "", String(stats.total)), " 条");
+  if (stats.failure) summary.append("，", el("b", "bad", `失败 ${stats.failure}`));
+  if (stats.warning) summary.append("，", el("b", "warn", `带警告 ${stats.warning}`));
+}
+
+// A refresh reloads every page already shown, so "load more" survives the
+// 3-second refresh; unchanged results skip the DOM rebuild.
+async function loadEvents({ append = false } = {}) {
+  const params = eventParams();
+  if (append) {
+    params.set("limit", "50");
+    params.set("cursor", state.eventCursor);
+  } else {
+    params.set("limit", String(Math.min(200, Math.max(50, state.events.length))));
+  }
+  const [page, stats] = await Promise.all([
+    api(`/api/events?${params}`).then(response => response.json()),
+    append ? null : api(`/api/stats?${params}`).then(response => response.json()),
+  ]);
+  state.events = append ? state.events.concat(page.items || []) : (page.items || []);
   state.eventCursor = page.next_cursor || "";
-  $("#load-more").classList.toggle("hidden", !state.eventCursor);
-  $("#event-empty").classList.toggle("hidden", body.children.length > 0);
-  if (statsResponse) {
-    const stats = await statsResponse.json();
-    $("#stat-total").textContent = stats.total;
-    $("#stat-success").textContent = stats.success;
-    $("#stat-failure").textContent = stats.failure;
-    $("#stat-rate").textContent = stats.total ? `${(stats.success_rate * 100).toFixed(1)}%` : "—";
-  }
+  if (stats) renderEventSummary(stats);
+  const signature = JSON.stringify([state.events, state.eventCursor, gmt8Date()]);
+  if (signature === state.eventSignature) return;
+  state.eventSignature = signature;
+  renderEvents(!append && state.knownEventIds.size > 0);
 }
 
-function createDetailCard(title, content, options = {}) {
-  const card = document.createElement("div");
-  card.className = `detail-card ${options.className || ""}`;
-
-  const header = document.createElement("div");
-  header.className = "detail-card-header";
-
-  const titleEl = document.createElement("span");
-  titleEl.className = "detail-card-title";
-  titleEl.textContent = title;
-  header.append(titleEl);
-
-  if (options.copyable !== false && content && content !== "—") {
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "copy-btn";
-    copyBtn.type = "button";
-    copyBtn.innerHTML = `
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-      复制
-    `;
-    copyBtn.addEventListener("click", () => {
-      navigator.clipboard.writeText(content).then(() => toast("已复制到剪贴板")).catch(() => toast("复制失败"));
-    });
-    header.append(copyBtn);
-  }
-
-  const body = document.createElement("div");
-  body.className = `detail-card-body ${options.mono ? "font-mono" : ""}`;
-  body.textContent = content || "—";
-
-  card.append(header, body);
-  return card;
+function resetEvents() {
+  state.events = [];
+  state.eventCursor = "";
+  state.knownEventIds = new Set();
+  const form = $("#event-filters");
+  $("#reset-event-filters").hidden = form.elements.quick_time.value === "24h"
+    && !form.elements.status.value && !form.elements.group_id.value && !form.elements.plugin.value;
+  return loadEvents();
 }
 
-async function showEventDetail(id) {
-  const detail = await (await api(`/api/events/${id}`)).json();
-  $("#detail-eyebrow").textContent = "RESPONSE DETAIL";
-  $("#detail-title").textContent = `${detail.plugin_name || detail.module_name || "未知插件"} · ${detail.status === "success" ? "成功" : "失败"}`;
-  
-  // 1. Meta Grid
-  const fields = {
-    "开始时间（GMT+8）": detail.time_display,
-    "结束时间（GMT+8）": detail.finished_display,
-    "事件类型": detail.event_name,
-    "模块": detail.module_name,
-    "Matcher": `${detail.matcher_type || "—"}${detail.matcher_lineno ? `:${detail.matcher_lineno}` : ""}`,
-    "群 / 用户": `${detail.group_id || "私聊"} / ${detail.user_id || "—"}`,
-    "耗时": detail.duration_ms != null ? `${detail.duration_ms} ms` : "—",
-    "发送状态": `${detail.send_success_count}/${detail.send_count} 成功${detail.send_failure_count ? `，${detail.send_failure_count} 失败` : ""}`,
-    "消息 ID": detail.source_message_id,
-    "run_id": detail.run_id,
-  };
+/* Detail dialog */
+
+function setMeta(fields) {
   const meta = $("#detail-meta");
   meta.replaceChildren();
-  for (const [label, value] of Object.entries(fields)) {
-    const box = document.createElement("div");
-    const title = document.createElement("span");
-    title.textContent = label;
-    box.append(title, document.createTextNode(value || "—"));
-    meta.append(box);
+  for (const [label, value, mono] of fields) {
+    if (!value) continue;
+    meta.append(el("dt", "", label), el("dd", mono ? "mono" : "", value));
   }
+}
 
-  // 2. Sections: Full Input & Output Cards
-  const sections = $("#detail-sections");
-  sections.replaceChildren();
-  sections.append(createDetailCard("📥 用户输入内容 (Request)", detail.request_summary || "（无输入内容）"));
-  sections.append(createDetailCard("📤 机器人响应内容 (Response)", detail.response_summary || "（无响应内容）"));
-
-  if (detail.status === "failure" || detail.error_type || detail.error_message) {
-    const errorText = [detail.error_type, detail.error_message].filter(Boolean).join(": ") || "未知错误";
-    sections.append(createDetailCard("⚠️ 错误详情 (Error Detail)", errorText, { className: "error-card", mono: true }));
+function setRaw(parts) {
+  const section = $("#raw-section");
+  const tabs = $("#raw-tabs");
+  tabs.replaceChildren();
+  section.hidden = parts.length === 0;
+  if (!parts.length) return;
+  for (const part of parts) {
+    const button = el("button", "", part.label);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      $$("button", tabs).forEach(item => item.classList.toggle("active", item === button));
+      loadRaw(part.path);
+    });
+    tabs.append(button);
   }
-
-  // 3. Raw Diagnostics Container (only show when has_full_diagnostics is true!)
-  const rawActions = $("#raw-actions");
-  const rawWrapper = $("#raw-content-wrapper");
-  rawActions.replaceChildren();
-
-  if (detail.has_full_diagnostics) {
-    rawActions.classList.remove("hidden");
-    rawWrapper.classList.remove("hidden");
-    $("#raw-toolbar-title").textContent = "Payload & Logs";
-    $("#raw-content").textContent = "点击上方按钮查看完整原始数据。";
-    $("#copy-raw-btn").classList.add("hidden");
-
-    for (const [part, label] of [["input", "完整输入"], ["output", "完整输出"], ["logs", "完整日志"]]) {
-      const view = document.createElement("button");
-      view.textContent = `查看${label}`;
-      view.addEventListener("click", () => loadRaw(`/api/events/${id}/raw/${part}`));
-      const download = document.createElement("a");
-      download.href = `/api/events/${id}/raw/${part}`;
-      download.textContent = `下载${label}`;
-      download.className = "button-link";
-      rawActions.append(view, download);
-    }
-  } else {
-    rawActions.classList.add("hidden");
-    rawWrapper.classList.add("hidden");
-  }
-
-  $("#detail-dialog").showModal();
+  tabs.hidden = parts.length === 1;
+  tabs.firstChild.click();
 }
 
 async function loadRaw(path) {
   const target = $("#raw-content");
-  const copyBtn = $("#copy-raw-btn");
-  target.textContent = "正在加载完整内容…";
-  copyBtn.classList.add("hidden");
+  const download = $("#download-raw");
+  download.href = path;
+  download.hidden = false;
+  $("#copy-raw").hidden = true;
+  target.textContent = "正在加载…";
   try {
     const text = await (await api(path)).text();
     try {
-      const json = JSON.parse(text);
-      target.textContent = JSON.stringify(json, null, 2);
+      target.textContent = JSON.stringify(JSON.parse(text), null, 2);
     } catch (_) {
       target.textContent = text;
     }
-    copyBtn.classList.remove("hidden");
+    $("#copy-raw").hidden = false;
   } catch (error) {
     target.textContent = `加载失败：${error.message}`;
   }
 }
 
+async function showEventDetail(id) {
+  const detail = await (await api(`/api/events/${id}`)).json();
+  $("#detail-title").textContent = detail.plugin_name || detail.module_name || "未知插件";
+  const tag = $("#detail-tag");
+  if (detail.status === "failure") {
+    tag.className = "tag failure";
+    tag.textContent = "失败";
+  } else {
+    tag.className = "tag success";
+    tag.textContent = "成功";
+  }
+
+  const conversation = $("#detail-exchange");
+  conversation.replaceChildren(...exchange(detail.request_summary, detail.response_summary));
+  if (detail.status === "failure" || detail.error_type || detail.error_message) {
+    const error = [detail.error_type, detail.error_message].filter(Boolean).join(": ") || "未知错误";
+    conversation.append(el("pre", "error-text", error));
+  }
+
+  const finished = detail.finished_display?.split(" ")[1];
+  setMeta([
+    ["时间", `${detail.time_display}${finished ? ` 至 ${finished}` : ""}（GMT+8）`],
+    ["耗时", formatDuration(detail.duration_ms)],
+    ["群", detail.group_id || "私聊"],
+    ["用户", detail.user_id],
+    ["事件类型", detail.event_name],
+    ["模块", detail.module_name, true],
+    ["Matcher", [detail.matcher_type, detail.matcher_lineno && `第 ${detail.matcher_lineno} 行`].filter(Boolean).join("，")],
+    ["发送", `${detail.send_success_count}/${detail.send_count} 条成功${detail.send_failure_count ? `，${detail.send_failure_count} 条失败` : ""}`],
+    ["消息 ID", detail.source_message_id, true],
+    ["run_id", detail.run_id, true],
+  ]);
+
+  setRaw(detail.has_full_diagnostics
+    ? [["input", "完整输入"], ["output", "完整输出"], ["logs", "完整日志"]]
+      .map(([part, label]) => ({ label, path: `/api/events/${id}/raw/${part}` }))
+    : []);
+  $("#detail-dialog").showModal();
+}
+
+function showDiagnosticDetail(group, occurrence) {
+  $("#detail-title").textContent = group.plugin_name || "系统";
+  const tag = $("#detail-tag");
+  tag.className = `tag ${group.level.toLowerCase()}`;
+  tag.textContent = LEVEL_LABELS[group.level];
+  $("#detail-exchange").replaceChildren();
+  setMeta([
+    ["时间", `${occurrence.time_display}（GMT+8）`],
+    ["Logger", group.logger_name, true],
+  ]);
+  setRaw([{ label: "完整日志", path: `/api/diagnostics/${occurrence.id}` }]);
+  $("#detail-dialog").showModal();
+}
+
+/* Diagnostics, grouped by message */
+
+function diagnosticParams() {
+  const form = $("#diagnostic-filters");
+  const params = new URLSearchParams();
+  if (form.elements.level.value) params.set("level", form.elements.level.value);
+  if (form.elements.plugin.value) params.set("plugin", form.elements.plugin.value);
+  const range = form.elements.quick_time.value;
+  if (range !== "all") params.set("from", hoursAgoAPI(HOURS[range]));
+  return params;
+}
+
+function issueItem(group, maxCount) {
+  const level = group.level.toLowerCase();
+  const details = el("details", `issue level-${level}`);
+  details.open = state.openIssues.has(group.key);
+  details.addEventListener("toggle", () => {
+    if (details.open) state.openIssues.add(group.key);
+    else state.openIssues.delete(group.key);
+  });
+
+  const summary = el("summary", "issue-grid");
+  const when = el("span", "issue-when num", relativeTime(group.last_ms));
+  when.dataset.ms = group.last_ms;
+  // Bars compare against the busiest group, so the loudest problem stands out.
+  const fill = el("span");
+  fill.style.width = `${(group.count / maxCount) * 100}%`;
+  const bar = el("span", "count-bar");
+  bar.append(fill);
+  const count = el("span", "count-cell");
+  count.append(el("span", "count-number", String(group.count)), bar);
+  summary.append(
+    el("span", `tag ${level}`, LEVEL_LABELS[group.level]),
+    el("span", "cell-plugin", group.plugin_name || "系统"),
+    el("span", "issue-msg", group.message),
+    count,
+    when,
+  );
+
+  const body = el("div", "issue-body issue-grid");
+  body.append(el("p", "", group.count > 1
+    ? `首次 ${group.first_display}，最近 ${group.last_display}。`
+    : `发生于 ${group.last_display}。`));
+  const occurrences = el("ol", "occurrences");
+  for (const occurrence of group.occurrences) {
+    // The year is noise here; the dialog shows the full time.
+    const button = el("button", "", occurrence.time_display.replace(/^\d{4}-/, ""));
+    button.type = "button";
+    button.addEventListener("click", () => showDiagnosticDetail(group, occurrence));
+    const item = el("li");
+    item.append(button);
+    occurrences.append(item);
+  }
+  body.append(occurrences);
+  if (group.count > group.occurrences.length) {
+    body.append(el("p", "", `只列出最近 ${group.occurrences.length} 次，点开查看完整日志。`));
+  }
+  details.append(summary, body);
+  const row = el("li");
+  row.append(details);
+  return row;
+}
+
+async function loadDiagnostics() {
+  const data = await (await api(`/api/diagnostics/groups?${diagnosticParams()}`)).json();
+  const summary = $("#diagnostic-summary");
+  if (data.total) {
+    summary.replaceChildren(
+      "共 ", el("b", "", String(data.total)), " 条，归为 ", el("b", "", String(data.groups.length)), " 类",
+      data.truncated ? "，只显示最近出现的 100 类" : "",
+    );
+  } else {
+    summary.textContent = "没有记录";
+  }
+
+  const signature = JSON.stringify(data.groups.map(group => [group.key, group.count, group.last_ms]));
+  if (signature !== state.diagnosticSignature) {
+    state.diagnosticSignature = signature;
+    const maxCount = Math.max(1, ...data.groups.map(group => group.count));
+    $("#diagnostic-list").replaceChildren(...data.groups.map(group => issueItem(group, maxCount)));
+  }
+  $$("#diagnostic-list .issue-when").forEach(item => { item.textContent = relativeTime(Number(item.dataset.ms)); });
+  $("#diagnostic-empty").hidden = data.groups.length > 0;
+}
+
+/* Header, filters, storage */
+
 async function loadFilters() {
   const data = await (await api("/api/filters")).json();
-  for (const selector of ['#event-filters select[name="group_id"]']) {
-    const select = $(selector);
-    if (!select) continue;
-    for (const value of data.groups || []) select.add(new Option(value, value));
-  }
-  for (const selector of ['#event-filters select[name="plugin"]', '#diagnostic-filters select[name="plugin"]']) {
-    const select = $(selector);
-    if (!select) continue;
+  const groups = $('#event-filters select[name="group_id"]');
+  for (const value of data.groups || []) groups.add(new Option(value, value));
+  for (const select of $$('select[name="plugin"]')) {
     for (const value of data.plugins || []) select.add(new Option(value, value));
   }
 }
@@ -304,470 +486,119 @@ async function loadFilters() {
 async function loadBotStatus() {
   const data = await (await api("/api/bot-status")).json();
   const element = $("#bot-status");
-  element.className = `status ${data.online ? "online" : "offline"}`;
-  const label = data.online ? "在线" : "离线";
-  const ids = data.bots.map(bot => bot.bot_id).join(", ");
-  element.querySelector(".status-text").textContent = ids ? `QQ ${ids} · ${label}` : label;
+  element.className = `bot ${data.online ? "online" : "offline"}`;
+  $(".bot-state", element).textContent = data.online ? "在线" : "离线";
+  $(".bot-id", element).textContent = data.bots.map(bot => bot.bot_id).join("、");
 }
 
-async function loadDiagnostics({ append = false } = {}) {
-  const form = $("#diagnostic-filters");
-  const params = new URLSearchParams({ limit: "50" });
-  if (form.elements.level.value) params.set("level", form.elements.level.value);
-  if (form.elements.plugin.value) params.set("plugin", form.elements.plugin.value);
-  if (append && state.diagnosticCursor) params.set("cursor", state.diagnosticCursor);
-  const page = await (await api(`/api/diagnostics?${params}`)).json();
-  const body = $("#diagnostic-rows");
-  if (!append) body.replaceChildren();
-  for (const item of page.items || []) {
-    const row = document.createElement("tr");
-    const level = document.createElement("td");
-    const badge = document.createElement("span");
-    badge.className = `badge ${item.level}`;
-    badge.textContent = item.level;
-    level.append(badge);
-    row.append(
-      textCell(item.time_display),
-      level,
-      textCell(item.plugin_name || item.module_name || item.logger_name),
-      textCell(item.message_summary, "summary"),
-    );
-    row.addEventListener("click", async () => {
-      $("#detail-eyebrow").textContent = "DIAGNOSTIC LOG";
-      $("#detail-title").textContent = `${item.level} · ${item.plugin_name || item.module_name || "系统"}`;
-      
-      const meta = $("#detail-meta");
-      meta.replaceChildren();
-      const fields = {
-        "记录时间（GMT+8）": item.time_display,
-        "日志级别": item.level,
-        "插件 / 模块": item.plugin_name || item.module_name || "—",
-        "Logger": item.logger_name || "—",
-      };
-      for (const [label, value] of Object.entries(fields)) {
-        const box = document.createElement("div");
-        const title = document.createElement("span");
-        title.textContent = label;
-        box.append(title, document.createTextNode(value || "—"));
-        meta.append(box);
-      }
+/* 24-hour pulse */
 
-      $("#detail-sections").replaceChildren();
-      $("#raw-actions").replaceChildren();
-      $("#raw-actions").classList.add("hidden");
-      $("#raw-content-wrapper").classList.remove("hidden");
-      $("#raw-toolbar-title").textContent = "完整诊断记录 (Traceback & Logs)";
+const OUTCOMES = ["success", "warning", "failure"];
 
-      $("#detail-dialog").showModal();
-      await loadRaw(`/api/diagnostics/${item.id}`);
+function hourLabel(hour) {
+  const start = new Date(hour.start_ms);
+  const p = gmt8Parts(start);
+  const next = gmt8Parts(new Date(hour.start_ms + 3600000));
+  const total = hour.success + hour.warning + hour.failure;
+  return `${dayLabel(gmt8Date(start))} ${p.hour}:00–${next.hour}:00\n`
+    + `响应 ${total}，带警告 ${hour.warning}，失败 ${hour.failure}`;
+}
+
+function showPulseTip(bar, hour) {
+  const tip = $("#pulse-tip");
+  tip.textContent = hourLabel(hour);
+  tip.hidden = false;
+  const half = tip.offsetWidth / 2;
+  const width = bar.parentElement.clientWidth;
+  const center = bar.offsetLeft + bar.offsetWidth / 2;
+  tip.style.left = `${Math.max(half, Math.min(width - half, center))}px`;
+}
+
+function hidePulseTip() {
+  $("#pulse-tip").hidden = true;
+}
+
+// Clicking an hour narrows the response log to exactly that hour.
+function showHour(startMs) {
+  const form = $("#event-filters");
+  form.elements.quick_time.value = "custom";
+  $(".custom-range", form).hidden = false;
+  form.elements.from.value = partsToInput(gmt8Parts(new Date(startMs)));
+  form.elements.to.value = partsToInput(gmt8Parts(new Date(startMs + 3599000)));
+  showView("events");
+  resetEvents().catch(error => toast(error.message));
+}
+
+function renderPulse(hours) {
+  const signature = JSON.stringify(hours);
+  if (signature === state.pulseSignature) return;
+  state.pulseSignature = signature;
+
+  const max = Math.max(1, ...hours.map(hour => hour.success + hour.warning + hour.failure));
+  const bars = hours.map(hour => {
+    const bar = el("button", "pulse-bar");
+    bar.type = "button";
+    bar.setAttribute("aria-label", hourLabel(hour));
+    for (const outcome of OUTCOMES) {
+      if (!hour[outcome]) continue;
+      const segment = el("span", `seg-${outcome}`);
+      segment.style.height = `${(hour[outcome] / max) * 100}%`;
+      bar.append(segment);
+    }
+    bar.addEventListener("mouseenter", () => showPulseTip(bar, hour));
+    bar.addEventListener("focus", () => showPulseTip(bar, hour));
+    bar.addEventListener("mouseleave", hidePulseTip);
+    bar.addEventListener("blur", hidePulseTip);
+    bar.addEventListener("click", () => {
+      hidePulseTip();
+      showHour(hour.start_ms);
     });
-    body.append(row);
-  }
-  state.diagnosticCursor = page.next_cursor || "";
-  $("#diagnostic-more").classList.toggle("hidden", !state.diagnosticCursor);
-  $("#diagnostic-empty").classList.toggle("hidden", body.children.length > 0);
+    return bar;
+  });
+  $("#pulse-bars").replaceChildren(...bars);
+
+  // Label every sixth hour, leaving room before the "现在" mark.
+  const last = hours.length - 1;
+  $("#pulse-axis").replaceChildren(...hours.map((hour, index) => {
+    if (index === last) return el("span", "now", "现在");
+    const p = gmt8Parts(new Date(hour.start_ms));
+    return el("span", "", Number(p.hour) % 6 === 0 && index < last - 3 ? `${p.hour}:00` : "");
+  }));
+}
+
+async function loadOverview() {
+  const { stats, hours, diagnostics } = await (await api("/api/overview")).json();
+  $("#pulse-total").textContent = stats.total;
+  $("#pulse-warning").textContent = stats.warning;
+  $("#pulse-failure").textContent = stats.failure;
+  $(".count-warning").classList.toggle("hot", stats.warning > 0);
+  $(".count-failure").classList.toggle("hot", stats.failure > 0);
+  $("#nav-events").textContent = stats.total;
+  const navDiagnostics = $("#nav-diagnostics");
+  navDiagnostics.textContent = diagnostics;
+  navDiagnostics.classList.toggle("alert", diagnostics > 0);
+  renderPulse(hours);
 }
 
 function updateClock() {
-  $("#current-time").textContent = `${gmt8NowDisplay()} · GMT+8`;
-}
-
-function startClock() {
-  clearInterval(state.clockTimer);
-  updateClock();
-  state.clockTimer = setInterval(updateClock, 1000);
+  const p = gmt8Parts();
+  $("#current-time").textContent = `${p.hour}:${p.minute}:${p.second}`;
+  $("#current-time").title = "GMT+8";
 }
 
 async function loadStorage() {
   const data = await (await api("/api/storage")).json();
+  const records = (count, earliest, latest) => count
+    ? `${count} 条\n${earliest} 至 ${latest}`
+    : "没有记录";
   $("#size-db").textContent = data.database;
   $("#size-wal").textContent = `${data.wal} / ${data.shm}`;
-  $("#size-spool").textContent = `${data.spool} · ${data.spool_files} 个文件`;
-  $("#record-count").textContent = `${data.response_count} 响应 / ${data.diagnostic_count} 诊断`;
-  const range = (earliest, latest) => earliest ? `${earliest} 至 ${latest}` : "无记录";
-  $("#record-range").textContent =
-    `响应：${range(data.response_earliest, data.response_latest)}\n诊断：${range(data.diagnostic_earliest, data.diagnostic_latest)}`;
+  $("#size-spool").textContent = `${data.spool}，${data.spool_files} 个文件`;
+  $("#response-records").textContent = records(data.response_count, data.response_earliest, data.response_latest);
+  $("#diagnostic-records").textContent = records(data.diagnostic_count, data.diagnostic_earliest, data.diagnostic_latest);
   $("#retention-policy").textContent = data.retention_days > 0
-    ? `自动保留最近 ${data.retention_days} 天，每天 04:15（GMT+8）清理更早的记录。`
-    : "自动保留已关闭，只能手动清理。";
-}
-
-async function loadSystemStatus() {
-  const status = await (await api("/api/system/status")).json();
-  $("#sys-hostname").textContent = status.hostname || "—";
-  $("#sys-os-kernel").textContent = `${status.os} / ${status.kernel} (${status.arch})`;
-  $("#sys-cpu-model").textContent = status.cpu_model || `${status.cpu_cores} 核`;
-  $("#sys-uptime-system").textContent = status.system_uptime_desc || "—";
-  $("#sys-uptime-proc").textContent = status.process_uptime_desc || "—";
-
-  const curr = status.current;
-  $("#sys-cpu-pct").textContent = `${curr.cpu_percent.toFixed(1)}%`;
-  $("#sys-cpu-bar").style.width = `${Math.min(100, curr.cpu_percent)}%`;
-  $("#sys-cpu-cores-badge").textContent = `${status.cpu_cores} 核`;
-
-  $("#sys-mem-pct").textContent = `${curr.memory_percent.toFixed(1)}%`;
-  $("#sys-mem-bar").style.width = `${Math.min(100, curr.memory_percent)}%`;
-  $("#sys-mem-text").textContent = `${formatBytes(curr.memory_used_bytes)} / ${formatBytes(curr.memory_total_bytes)}`;
-  $("#sys-swap-text").textContent = `${formatBytes(curr.swap_used_bytes)} / ${formatBytes(curr.swap_total_bytes)}`;
-
-  $("#sys-disk-pct").textContent = `${curr.disk_percent.toFixed(1)}%`;
-  $("#sys-disk-bar").style.width = `${Math.min(100, curr.disk_percent)}%`;
-  $("#sys-disk-text").textContent = `${formatBytes(curr.disk_used_bytes)} / ${formatBytes(curr.disk_total_bytes)}`;
-
-  $("#sys-load-text").textContent = `${curr.load1.toFixed(2)} / ${curr.load5.toFixed(2)} / ${curr.load15.toFixed(2)}`;
-  $("#sys-procs-text").textContent = `${curr.process_count}`;
-  $("#sys-goroutines-text").textContent = `${status.goroutines} (${formatBytes(status.go_heap_alloc_bytes)})`;
-
-  $("#sys-net-rx").textContent = `↓ ${formatBytes(curr.net_rx_bytes_per_sec)}/s`;
-  $("#sys-net-tx").textContent = `↑ ${formatBytes(curr.net_tx_bytes_per_sec)}/s`;
-}
-
-async function loadSystemHistory(window = state.systemWindow) {
-  const data = await (await api(`/api/system/history?window=${window}`)).json();
-  state.systemHistoryData = data;
-  const points = data.points || [];
-  const fromMs = data.from_ms;
-  const toMs = data.to_ms;
-
-  if (points.length > 0) {
-    const last = points[points.length - 1];
-    let maxCPU = 0;
-    for (const p of points) {
-      if (p.cpu_max > maxCPU) maxCPU = p.cpu_max;
-      if (p.cpu_percent > maxCPU) maxCPU = p.cpu_percent;
-    }
-    $("#chart-cpu-stat").textContent = `当前: ${last.cpu_percent.toFixed(1)}% | 峰值: ${maxCPU.toFixed(1)}%`;
-    $("#chart-mem-stat").textContent = `当前: ${last.memory_percent.toFixed(1)}% (${formatBytes(last.memory_used_bytes)})`;
-    $("#chart-net-stat").textContent = `下行: ${formatBytes(last.net_rx_bytes_per_sec)}/s | 上行: ${formatBytes(last.net_tx_bytes_per_sec)}/s`;
-  }
-
-  // Render CPU Chart
-  renderSVGChart("chart-cpu-container", {
-    points,
-    fromMs,
-    toMs,
-    window,
-    series: [
-      { key: "cpu_percent", color: "#38bdf8", gradientId: "grad-cpu", label: "CPU 使用率", unit: "%" },
-    ],
-    yMin: 0,
-    yMax: 100,
-    gridSteps: 4,
-    formatY: v => `${Math.round(v)}%`,
-    formatTooltip: (p) => `${p.time_display}<br>CPU 使用率: <b>${p.cpu_percent.toFixed(1)}%</b> (峰值: ${p.cpu_max.toFixed(1)}%)`,
-  });
-
-  // Render Memory Chart
-  renderSVGChart("chart-mem-container", {
-    points,
-    fromMs,
-    toMs,
-    window,
-    series: [
-      { key: "memory_percent", color: "#c084fc", gradientId: "grad-mem", label: "内存使用率", unit: "%" },
-    ],
-    yMin: 0,
-    yMax: 100,
-    gridSteps: 4,
-    formatY: v => `${Math.round(v)}%`,
-    formatTooltip: (p) => `${p.time_display}<br>内存占用: <b>${p.memory_percent.toFixed(1)}%</b> (${formatBytes(p.memory_used_bytes)})`,
-  });
-
-  // Render Network Chart
-  let maxNet = 1024;
-  for (const p of points) {
-    if (p.net_rx_bytes_per_sec > maxNet) maxNet = p.net_rx_bytes_per_sec;
-    if (p.net_tx_bytes_per_sec > maxNet) maxNet = p.net_tx_bytes_per_sec;
-  }
-
-  function niceNetCeiling(val) {
-    const steps = [
-      1024, // 1 KB/s
-      4 * 1024, // 4 KB/s
-      8 * 1024, // 8 KB/s
-      16 * 1024, // 16 KB/s
-      32 * 1024, // 32 KB/s
-      64 * 1024, // 64 KB/s
-      128 * 1024, // 128 KB/s
-      256 * 1024, // 256 KB/s
-      512 * 1024, // 512 KB/s
-      1024 * 1024, // 1 MB/s
-      2 * 1024 * 1024, // 2 MB/s
-      4 * 1024 * 1024, // 4 MB/s
-      8 * 1024 * 1024, // 8 MB/s
-      16 * 1024 * 1024, // 16 MB/s
-      32 * 1024 * 1024, // 32 MB/s
-      64 * 1024 * 1024, // 64 MB/s
-      128 * 1024 * 1024, // 128 MB/s
-    ];
-    for (const s of steps) {
-      if (val <= s) return s;
-    }
-    return Math.ceil(val / (1024 * 1024 * 4)) * (1024 * 1024 * 4);
-  }
-
-  const roundedMaxNet = niceNetCeiling(maxNet * 1.05);
-
-  renderSVGChart("chart-net-container", {
-    points,
-    fromMs,
-    toMs,
-    window,
-    series: [
-      { key: "net_rx_bytes_per_sec", color: "#2dd4bf", gradientId: "grad-rx", label: "下行 (RX)", unit: "B/s" },
-      { key: "net_tx_bytes_per_sec", color: "#c084fc", gradientId: "grad-tx", label: "上行 (TX)", unit: "B/s" },
-    ],
-    yMin: 0,
-    yMax: roundedMaxNet,
-    gridSteps: 4,
-    formatY: v => v === 0 ? "0 B/s" : `${formatBytes(v, 0)}/s`,
-    formatTooltip: (p) => `${p.time_display}<br>下行速率: <b>${formatBytes(p.net_rx_bytes_per_sec)}/s</b><br>上行速率: <b>${formatBytes(p.net_tx_bytes_per_sec)}/s</b>`,
-  });
-}
-
-function renderSVGChart(containerId, options) {
-  const container = $(`#${containerId}`);
-  if (!container) return;
-
-  const {
-    points = [],
-    series = [],
-    fromMs = (Date.now() - 3600000),
-    toMs = Date.now(),
-    window = "1h",
-    yMin = 0,
-    yMax = 100,
-    gridSteps = 4,
-    formatY = (v) => v,
-    formatTooltip,
-  } = options;
-
-  const containerRect = container.getBoundingClientRect();
-  const svgWidth = Math.max(280, Math.floor(containerRect.width || container.clientWidth || 600));
-  const svgHeight = 200;
-  const padLeft = 68;
-  const padRight = 18;
-  const padTop = 16;
-  const padBottom = 28;
-
-  const plotWidth = Math.max(10, svgWidth - padLeft - padRight);
-  const plotHeight = Math.max(10, svgHeight - padTop - padBottom);
-
-  const timeSpan = Math.max(1000, toMs - fromMs);
-  const yRange = yMax - yMin || 1;
-
-  const getX = (timestampMs) => {
-    const clamped = Math.max(fromMs, Math.min(toMs, timestampMs || fromMs));
-    return padLeft + ((clamped - fromMs) / timeSpan) * plotWidth;
-  };
-
-  const getY = (val) => {
-    const clamped = Math.max(yMin, Math.min(yMax, val || 0));
-    return padTop + plotHeight - ((clamped - yMin) / yRange) * plotHeight;
-  };
-
-  const isLight = document.documentElement.getAttribute("data-theme") === "light";
-  const gridStroke = isLight ? "rgba(0, 0, 0, 0.07)" : "rgba(255, 255, 255, 0.06)";
-  const baselineStroke = isLight ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.18)";
-  const tickStroke = isLight ? "rgba(0, 0, 0, 0.25)" : "rgba(255, 255, 255, 0.3)";
-  const textFill = isLight ? "#64748b" : "#8493a8";
-  const crosshairStroke = isLight ? "rgba(0, 0, 0, 0.35)" : "rgba(255, 255, 255, 0.4)";
-
-  // Build Horizontal Grid Lines & Y Labels
-  let gridSVG = "";
-  for (let i = 0; i <= gridSteps; i++) {
-    const val = yMin + (i / gridSteps) * yRange;
-    const yPos = getY(val);
-    if (i > 0 && i < gridSteps) {
-      gridSVG += `
-        <line x1="${padLeft}" y1="${yPos}" x2="${svgWidth - padRight}" y2="${yPos}" stroke="${gridStroke}" stroke-dasharray="4 4" />
-      `;
-    }
-    gridSVG += `
-      <text x="${padLeft - 8}" y="${yPos + 3.5}" fill="${textFill}" font-size="11" text-anchor="end" font-family="'JetBrains Mono', monospace">${formatY(val)}</text>
-    `;
-  }
-
-  // Coordinate Frame Baselines (Left Y-axis line and Bottom X-axis line)
-  const baselineFrameSVG = `
-    <line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotHeight}" stroke="${baselineStroke}" stroke-width="1.2" />
-    <line x1="${padLeft}" y1="${padTop + plotHeight}" x2="${svgWidth - padRight}" y2="${padTop + plotHeight}" stroke="${baselineStroke}" stroke-width="1.2" />
-  `;
-
-  // Fixed X Time Ticks & Time Labels based on the actual window [fromMs, toMs]
-  let xLabelsSVG = "";
-  const xTickCount = svgWidth < 420 ? 2 : (svgWidth < 680 ? 3 : 4);
-  for (let i = 0; i <= xTickCount; i++) {
-    const tickMs = fromMs + (i / xTickCount) * timeSpan;
-    const xPos = padLeft + (i / xTickCount) * plotWidth;
-    const anchor = i === 0 ? "start" : i === xTickCount ? "end" : "middle";
-
-    const tickDate = new Date(tickMs);
-    const pParts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Shanghai",
-      month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", second: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(tickDate);
-    const parts = Object.fromEntries(pParts.map(({ type, value }) => [type, value]));
-
-    let timeText = `${parts.hour}:${parts.minute}`;
-    if (window === "24h" || window === "7d") {
-      timeText = `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
-    } else if (window === "30m" || window === "1h") {
-      timeText = `${parts.hour}:${parts.minute}:${parts.second}`;
-    }
-
-    xLabelsSVG += `
-      <line x1="${xPos}" y1="${padTop + plotHeight}" x2="${xPos}" y2="${padTop + plotHeight + 5}" stroke="${tickStroke}" stroke-width="1.2" />
-      <text x="${xPos}" y="${padTop + plotHeight + 19}" fill="${textFill}" font-size="11" text-anchor="${anchor}" font-family="'JetBrains Mono', monospace">${timeText}</text>
-    `;
-  }
-
-  // Build Gradients & Series Paths
-  let defsSVG = "";
-  let pathsSVG = "";
-
-  if (points.length === 0) {
-    pathsSVG = `<text x="${padLeft + plotWidth / 2}" y="${padTop + plotHeight / 2}" fill="${textFill}" font-size="12" text-anchor="middle" font-family="'JetBrains Mono', monospace">暂无时序数据</text>`;
-  } else {
-    series.forEach((s) => {
-      const gradId = `${containerId}-${s.gradientId}`;
-      const filterId = `${containerId}-glow-${s.key}`;
-      defsSVG += `
-        <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="${s.color}" stop-opacity="${isLight ? '0.28' : '0.42'}" />
-          <stop offset="60%" stop-color="${s.color}" stop-opacity="${isLight ? '0.08' : '0.12'}" />
-          <stop offset="100%" stop-color="${s.color}" stop-opacity="0.0" />
-        </linearGradient>
-        <filter id="${filterId}" x="-20%" y="-20%" width="140%" height="140%">
-          <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="${s.color}" flood-opacity="${isLight ? '0.25' : '0.45'}" />
-        </filter>
-      `;
-
-      const pts = points.map((p) => ({ x: getX(p.timestamp_ms), y: getY(p[s.key]) }));
-
-      if (pts.length === 1) {
-        pathsSVG += `<circle cx="${pts[0].x.toFixed(1)}" cy="${pts[0].y.toFixed(1)}" r="4" fill="${s.color}" filter="url(#${filterId})" />`;
-      } else {
-        // Area Path (anchored from first point's X to last point's X)
-        let areaD = `M ${pts[0].x.toFixed(1)} ${(padTop + plotHeight).toFixed(1)}`;
-        pts.forEach((pt) => {
-          areaD += ` L ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`;
-        });
-        areaD += ` L ${pts[pts.length - 1].x.toFixed(1)} ${(padTop + plotHeight).toFixed(1)} Z`;
-
-        // Line Path
-        let lineD = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
-        for (let i = 1; i < pts.length; i++) {
-          lineD += ` L ${pts[i].x.toFixed(1)} ${pts[i].y.toFixed(1)}`;
-        }
-
-        pathsSVG += `
-          <path d="${areaD}" fill="url(#${gradId})" />
-          <path d="${lineD}" fill="none" stroke="${s.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" filter="url(#${filterId})" />
-        `;
-      }
-    });
-  }
-
-  const svgHTML = `
-    <svg width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}" style="display: block; width: 100%; height: 100%;">
-      <defs>${defsSVG}</defs>
-      ${gridSVG}
-      ${baselineFrameSVG}
-      ${pathsSVG}
-      ${xLabelsSVG}
-      <line id="${containerId}-crosshair" x1="0" y1="${padTop}" x2="0" y2="${padTop + plotHeight}" stroke="${crosshairStroke}" stroke-dasharray="3 3" style="display: none;" />
-      ${series.map(s => `<circle id="${containerId}-dot-${s.key}" r="5" fill="${s.color}" stroke="${isLight ? '#ffffff' : '#090c15'}" stroke-width="2" style="display: none;" />`).join("")}
-      <rect id="${containerId}-overlay" x="${padLeft}" y="${padTop}" width="${plotWidth}" height="${plotHeight}" fill="transparent" style="cursor: crosshair;" />
-    </svg>
-    <div id="${containerId}-tooltip" class="chart-tooltip-floating font-mono" style="display: none; opacity: 0;"></div>
-  `;
-
-  container.innerHTML = svgHTML;
-
-  // Interactive crosshair & hover tooltip by nearest timestamp
-  const overlay = $(`#${containerId}-overlay`, container);
-  const crosshair = $(`#${containerId}-crosshair`, container);
-  const tooltip = $(`#${containerId}-tooltip`, container);
-
-  if (overlay && tooltip && points.length > 0) {
-    const handleMove = (clientX) => {
-      const rect = container.getBoundingClientRect();
-      const relativeX = clientX - rect.left - padLeft;
-      const hoverPct = Math.max(0, Math.min(1, relativeX / plotWidth));
-      const hoverMs = fromMs + hoverPct * timeSpan;
-
-      // Find nearest point
-      let closestPoint = points[0];
-      let minDiff = Math.abs(points[0].timestamp_ms - hoverMs);
-      for (let i = 1; i < points.length; i++) {
-        const diff = Math.abs(points[i].timestamp_ms - hoverMs);
-        if (diff < minDiff) {
-          minDiff = diff;
-          closestPoint = points[i];
-        }
-      }
-
-      if (closestPoint) {
-        const ptX = getX(closestPoint.timestamp_ms);
-
-        crosshair.setAttribute("x1", ptX);
-        crosshair.setAttribute("x2", ptX);
-        crosshair.style.display = "block";
-
-        series.forEach((s) => {
-          const dot = $(`#${containerId}-dot-${s.key}`, container);
-          if (dot) {
-            dot.setAttribute("cx", ptX);
-            dot.setAttribute("cy", getY(closestPoint[s.key]));
-            dot.style.display = "block";
-          }
-        });
-
-        tooltip.innerHTML = formatTooltip ? formatTooltip(closestPoint) : `${closestPoint.time_display}`;
-        tooltip.style.left = `${Math.max(60, Math.min(svgWidth - 60, ptX))}px`;
-        tooltip.style.top = `${getY(closestPoint[series[0].key]) - 10}px`;
-        tooltip.style.display = "block";
-        tooltip.style.opacity = "1";
-      }
-    };
-
-    const handleLeave = () => {
-      crosshair.style.display = "none";
-      series.forEach((s) => {
-        const dot = $(`#${containerId}-dot-${s.key}`, container);
-        if (dot) dot.style.display = "none";
-      });
-      tooltip.style.display = "none";
-      tooltip.style.opacity = "0";
-    };
-
-    overlay.addEventListener("mousemove", (e) => handleMove(e.clientX));
-    overlay.addEventListener("mouseleave", handleLeave);
-    overlay.addEventListener("touchmove", (e) => {
-      if (e.touches && e.touches[0]) handleMove(e.touches[0].clientX);
-    }, { passive: true });
-    overlay.addEventListener("touchend", handleLeave);
-  }
-}
-
-function calendarMonthsAgo(months) {
-  const p = gmt8Parts();
-  const year = Number(p.year);
-  const monthIndex = Number(p.month) - 1 - months;
-  const targetYear = year + Math.floor(monthIndex / 12);
-  const targetMonth = ((monthIndex % 12) + 12) % 12;
-  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
-  return partsToInput({
-    year: targetYear,
-    month: targetMonth + 1,
-    day: Math.min(Number(p.day), lastDay),
-    hour: p.hour,
-    minute: p.minute,
-    second: p.second,
-  });
+    ? `保留最近 ${data.retention_days} 天，每天 04:15（GMT+8）清理更早的记录`
+    : "已关闭，只能手动清理";
 }
 
 function updateCleanupCutoff() {
@@ -775,56 +606,271 @@ function updateCleanupCutoff() {
   if (value !== "custom") $("#cleanup-cutoff").value = calendarMonthsAgo(Number(value));
   state.previewCutoff = "";
   $("#execute-cleanup").disabled = true;
-  $("#cleanup-preview span").textContent = "截止时间已变化，请重新预览。";
-}
-
-async function mutation(path, body) {
-  return api(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  $("#execute-cleanup").textContent = "清理";
+  $("#cleanup-preview").textContent = "先预览会删除多少条记录。";
 }
 
 async function previewCleanup() {
   const cutoff = inputToAPI($("#cleanup-cutoff").value);
-  if (!cutoff) throw new Error("请选择完整的 GMT+8 截止时间");
-  const data = await (await mutation("/api/storage/cleanup/preview", { cutoff })).json();
+  if (!cutoff) throw new Error("请填写完整的截止时间");
+  const { preview } = await (await mutation("/api/storage/cleanup/preview", { cutoff })).json();
   state.previewCutoff = cutoff;
-  $("#cleanup-preview span").textContent = `将删除 ${data.preview.response_count} 条响应和 ${data.preview.diagnostic_count} 条诊断；截止点：${data.preview.cutoff_display} GMT+8。`;
-  const execute = $("#execute-cleanup");
-  execute.textContent = `清理 ${data.preview.cutoff_display} GMT+8 之前的日志`;
-  execute.disabled = false;
+  $("#cleanup-preview").textContent =
+    `会删除 ${preview.cutoff_display}（GMT+8）之前的 ${preview.response_count} 条响应和 ${preview.diagnostic_count} 条诊断。`;
+  $("#execute-cleanup").textContent = `清理 ${preview.response_count + preview.diagnostic_count} 条记录`;
+  $("#execute-cleanup").disabled = false;
 }
 
 async function executeCleanup() {
-  if (!state.previewCutoff) throw new Error("请先预览清理范围");
-  const exact = `将永久删除 ${state.previewCutoff} GMT+8 之前的日志。此操作无法撤销，是否继续？`;
-  if (!window.confirm(exact)) return;
+  if (!window.confirm(`永久删除 ${state.previewCutoff}（GMT+8）之前的日志？删除后无法恢复。`)) return;
   $("#execute-cleanup").disabled = true;
   const data = await (await mutation("/api/storage/cleanup", { cutoff: state.previewCutoff })).json();
   state.previewCutoff = "";
-  $("#cleanup-preview span").textContent = `完成：删除 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断。`;
-  toast("日志清理和增量空间回收已完成");
-  await Promise.all([loadStorage(), loadEvents(), loadDiagnostics()]);
+  $("#execute-cleanup").textContent = "清理";
+  $("#cleanup-preview").textContent = `已清理 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断，空间已回收。`;
+  toast("已清理");
+  await loadStorage();
+}
+
+/* Server */
+
+function setMeter(id, percent) {
+  const bar = $(id);
+  bar.style.width = `${Math.min(100, percent)}%`;
+  bar.className = percent >= 90 ? "critical" : percent >= 80 ? "high" : "";
+}
+
+function setFacts(list, pairs) {
+  list.replaceChildren(...pairs.map(([label, value]) => {
+    const row = el("div");
+    row.append(el("dt", "", label), el("dd", "", value));
+    return row;
+  }));
+}
+
+// Runs on every refresh: the sidebar vitals are visible from every view.
+async function loadSystemStatus() {
+  const status = await (await api("/api/system/status")).json();
+  const current = status.current;
+
+  $("#vital-cpu").textContent = `${Math.round(current.cpu_percent)}%`;
+  setMeter("#vital-cpu-bar", current.cpu_percent);
+  $("#vital-mem").textContent = `${Math.round(current.memory_percent)}%`;
+  setMeter("#vital-mem-bar", current.memory_percent);
+
+  setFacts($("#host-facts"), [
+    ["主机名", status.hostname],
+    ["内核", `${status.kernel}（${status.arch}）`],
+    ["CPU", `${status.cpu_model || "未知型号"}，${status.cpu_cores} 核`],
+    ["系统运行", status.system_uptime_desc],
+    ["控制台运行", status.process_uptime_desc],
+    ["控制台内存", `${formatBytes(status.go_heap_alloc_bytes)} 堆，${status.goroutines} 个 goroutine`],
+  ]);
+
+  $("#sys-cpu-value").textContent = `${current.cpu_percent.toFixed(1)}%`;
+  setMeter("#sys-cpu-bar", current.cpu_percent);
+  $("#sys-cpu-detail").textContent = `${status.cpu_cores} 核，${current.process_count} 个进程`;
+
+  $("#sys-mem-value").textContent = `${current.memory_percent.toFixed(1)}%`;
+  setMeter("#sys-mem-bar", current.memory_percent);
+  $("#sys-mem-detail").textContent =
+    `${formatBytes(current.memory_used_bytes)} / ${formatBytes(current.memory_total_bytes)}，Swap ${formatBytes(current.swap_used_bytes)} / ${formatBytes(current.swap_total_bytes)}`;
+
+  $("#sys-disk-value").textContent = `${current.disk_percent.toFixed(1)}%`;
+  setMeter("#sys-disk-bar", current.disk_percent);
+  $("#sys-disk-detail").textContent = `${formatBytes(current.disk_used_bytes)} / ${formatBytes(current.disk_total_bytes)}`;
+
+  $("#sys-load-value").textContent = current.load1.toFixed(2);
+  setMeter("#sys-load-bar", (current.load1 / status.cpu_cores) * 100);
+  $("#sys-load-detail").textContent = `5 分钟 ${current.load5.toFixed(2)}，15 分钟 ${current.load15.toFixed(2)}`;
+
+  $("#sys-net-value").textContent = `↓ ${formatBytes(current.net_rx_bytes_per_sec)}/s`;
+  $("#sys-net-detail").textContent = `↑ ${formatBytes(current.net_tx_bytes_per_sec)}/s`;
+}
+
+function niceNetCeiling(value) {
+  let ceiling = 1024;
+  while (ceiling < value) ceiling *= 2;
+  return ceiling;
+}
+
+async function loadSystemHistory() {
+  const data = await (await api(`/api/system/history?window=${state.systemWindow}`)).json();
+  state.systemHistory = data;
+  renderCharts();
+}
+
+function renderCharts() {
+  const data = state.systemHistory;
+  const points = data.points || [];
+  const last = points[points.length - 1];
+  const peak = points.reduce((max, p) => Math.max(max, p.cpu_max, p.cpu_percent), 0);
+  $("#chart-cpu-stat").textContent = last ? `当前 ${last.cpu_percent.toFixed(1)}%，峰值 ${peak.toFixed(1)}%` : "";
+  $("#chart-mem-stat").textContent = last ? `当前 ${last.memory_percent.toFixed(1)}%（${formatBytes(last.memory_used_bytes)}）` : "";
+  $("#chart-net-stat").textContent = last
+    ? `↓ ${formatBytes(last.net_rx_bytes_per_sec)}/s，↑ ${formatBytes(last.net_tx_bytes_per_sec)}/s`
+    : "";
+
+  const common = { points, fromMs: data.from_ms, toMs: data.to_ms };
+  const percent = value => `${Math.round(value)}%`;
+  renderChart("#chart-cpu", {
+    ...common,
+    series: [{ key: "cpu_percent", className: "series-1" }],
+    yMax: 100,
+    thresholds: true,
+    formatY: percent,
+    tooltip: p => `${p.time_display}\nCPU ${p.cpu_percent.toFixed(1)}%，峰值 ${p.cpu_max.toFixed(1)}%`,
+  });
+  renderChart("#chart-mem", {
+    ...common,
+    series: [{ key: "memory_percent", className: "series-2" }],
+    yMax: 100,
+    thresholds: true,
+    formatY: percent,
+    tooltip: p => `${p.time_display}\n内存 ${p.memory_percent.toFixed(1)}%（${formatBytes(p.memory_used_bytes)}）`,
+  });
+  const netMax = points.reduce((max, p) => Math.max(max, p.net_rx_bytes_per_sec, p.net_tx_bytes_per_sec), 0);
+  renderChart("#chart-net", {
+    ...common,
+    series: [
+      { key: "net_rx_bytes_per_sec", className: "series-2" },
+      { key: "net_tx_bytes_per_sec", className: "series-3", noArea: true },
+    ],
+    yMax: niceNetCeiling(netMax * 1.05),
+    formatY: value => (value ? `${formatBytes(value, 0)}/s` : "0"),
+    tooltip: p => `${p.time_display}\n↓ ${formatBytes(p.net_rx_bytes_per_sec)}/s，↑ ${formatBytes(p.net_tx_bytes_per_sec)}/s`,
+  });
+}
+
+// Colors come from CSS classes, so a theme switch needs no re-render.
+function renderChart(selector, { points, fromMs, toMs, series, yMax, thresholds, formatY, tooltip }) {
+  const container = $(selector);
+  const width = Math.max(280, Math.floor(container.clientWidth));
+  const height = container.clientHeight;
+  const pad = { left: 52, right: 8, top: 8, bottom: 24 };
+  const plotWidth = width - pad.left - pad.right;
+  const plotHeight = height - pad.top - pad.bottom;
+  const span = Math.max(1000, toMs - fromMs);
+  const x = ms => pad.left + ((Math.min(toMs, Math.max(fromMs, ms)) - fromMs) / span) * plotWidth;
+  const y = value => pad.top + plotHeight - (Math.min(yMax, Math.max(0, value || 0)) / yMax) * plotHeight;
+  const bottom = pad.top + plotHeight;
+
+  let svg = "";
+  for (let i = 0; i <= 4; i++) {
+    const value = (yMax * i) / 4;
+    const yPos = y(value).toFixed(1);
+    svg += `<line class="${i ? "chart-grid" : "chart-axis"}" x1="${pad.left}" x2="${width - pad.right}" y1="${yPos}" y2="${yPos}"/>`;
+    svg += `<text class="chart-label" x="${pad.left - 8}" y="${Number(yPos) + 4}" text-anchor="end">${formatY(value)}</text>`;
+  }
+  // Same 80% / 90% lines the meters turn amber and red at.
+  if (thresholds) {
+    for (const [value, className] of [[80, "threshold-high"], [90, "threshold-critical"]]) {
+      svg += `<line class="chart-threshold ${className}" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"/>`;
+    }
+  }
+  const ticks = width < 420 ? 2 : 3;
+  const longSpan = span > 12 * 3600000;
+  for (let i = 0; i <= ticks; i++) {
+    const p = gmt8Parts(new Date(fromMs + (i / ticks) * span));
+    const label = longSpan ? `${Number(p.month)}-${Number(p.day)} ${p.hour}:${p.minute}` : `${p.hour}:${p.minute}`;
+    const anchor = i === 0 ? "start" : i === ticks ? "end" : "middle";
+    svg += `<text class="chart-label" x="${pad.left + (i / ticks) * plotWidth}" y="${height - 6}" text-anchor="${anchor}">${label}</text>`;
+  }
+
+  if (!points.length) {
+    svg += `<text class="chart-label" x="${pad.left + plotWidth / 2}" y="${pad.top + plotHeight / 2}" text-anchor="middle">还没有采样数据</text>`;
+  }
+  for (const s of series) {
+    if (!points.length) break;
+    const coords = points.map(p => `${x(p.timestamp_ms).toFixed(1)} ${y(p[s.key]).toFixed(1)}`);
+    if (!s.noArea) {
+      svg += `<path class="chart-area ${s.className}" d="M ${x(points[0].timestamp_ms).toFixed(1)} ${bottom} L ${coords.join(" L ")} L ${x(points[points.length - 1].timestamp_ms).toFixed(1)} ${bottom} Z"/>`;
+    }
+    svg += `<path class="chart-line ${s.className}" d="M ${coords.join(" L ")}"/>`;
+  }
+  svg += `<line class="chart-cross" y1="${pad.top}" y2="${bottom}" visibility="hidden"/>`;
+  svg += series.map(s => `<circle class="chart-dot ${s.className}" r="4" visibility="hidden"/>`).join("");
+  svg += `<rect class="chart-hit" x="${pad.left}" y="${pad.top}" width="${plotWidth}" height="${plotHeight}" fill="transparent"/>`;
+
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" aria-hidden="true">${svg}</svg>`;
+  if (!points.length) return;
+
+  const tip = el("div", "chart-tip");
+  tip.hidden = true;
+  container.append(tip);
+  const cross = $(".chart-cross", container);
+  const dots = $$(".chart-dot", container);
+  const show = clientX => {
+    const ms = fromMs + ((clientX - container.getBoundingClientRect().left - pad.left) / plotWidth) * span;
+    const point = points.reduce((best, p) => (Math.abs(p.timestamp_ms - ms) < Math.abs(best.timestamp_ms - ms) ? p : best));
+    const px = x(point.timestamp_ms);
+    cross.setAttribute("x1", px);
+    cross.setAttribute("x2", px);
+    cross.setAttribute("visibility", "visible");
+    series.forEach((s, i) => {
+      dots[i].setAttribute("cx", px);
+      dots[i].setAttribute("cy", y(point[s.key]));
+      dots[i].setAttribute("visibility", "visible");
+    });
+    tip.textContent = tooltip(point);
+    tip.style.left = `${Math.max(80, Math.min(width - 80, px))}px`;
+    tip.style.top = `${y(point[series[0].key])}px`;
+    tip.hidden = false;
+  };
+  const hide = () => {
+    cross.setAttribute("visibility", "hidden");
+    dots.forEach(dot => dot.setAttribute("visibility", "hidden"));
+    tip.hidden = true;
+  };
+  const hit = $(".chart-hit", container);
+  hit.addEventListener("mousemove", event => show(event.clientX));
+  hit.addEventListener("mouseleave", hide);
+  hit.addEventListener("touchmove", event => show(event.touches[0].clientX), { passive: true });
+  hit.addEventListener("touchend", hide);
+}
+
+/* Views, refresh, theme */
+
+function activeView() {
+  return $(".nav-item.active").dataset.view;
+}
+
+function showView(view) {
+  $$(".nav-item").forEach(item => {
+    const active = item.dataset.view === view;
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  $$(".view").forEach(section => section.classList.toggle("active", section.id === `view-${view}`));
+}
+
+function loadView(view) {
+  if (view === "events") return loadEvents();
+  if (view === "diagnostics") return loadDiagnostics();
+  if (view === "storage") return loadStorage();
+  return loadSystemHistory();
+}
+
+function setLive(ok) {
+  const live = $("#live");
+  live.classList.remove("tick");
+  live.classList.toggle("error", !ok);
+  $(".live-text", live).textContent = ok ? "每 3 秒刷新" : "刷新失败，正在重试";
+  if (!ok) return;
+  void live.offsetWidth; // restart the pulse animation
+  live.classList.add("tick");
 }
 
 async function refreshVisibleView() {
   if (document.hidden || state.refreshInFlight) return;
   state.refreshInFlight = true;
-  const activeView = $(".tab.active")?.dataset.view || "events";
-  const requests = [loadBotStatus()];
-  if (activeView === "events") requests.push(loadEvents());
-  if (activeView === "diagnostics") requests.push(loadDiagnostics());
-  if (activeView === "storage") requests.push(loadStorage());
-  if (activeView === "system") {
-    requests.push(loadSystemStatus());
-    requests.push(loadSystemHistory(state.systemWindow));
-  }
   try {
-    await Promise.all(requests);
+    await Promise.all([loadBotStatus(), loadOverview(), loadSystemStatus(), loadView(activeView())]);
     state.refreshErrorShown = false;
+    setLive(true);
   } catch (error) {
+    setLive(false);
     if (!state.refreshErrorShown) {
       toast(`自动刷新失败：${error.message}`);
       state.refreshErrorShown = true;
@@ -834,127 +880,109 @@ async function refreshVisibleView() {
   }
 }
 
-function startPeriodicRefresh() {
-  clearInterval(state.refreshTimer);
-  state.refreshTimer = setInterval(refreshVisibleView, 3000);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refreshVisibleView();
-  });
+const systemTheme = () => (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  $("#theme-toggle").setAttribute("aria-label", theme === "light" ? "切换到深色主题" : "切换到浅色主题");
+}
+
+// Choosing the system's own theme drops the saved choice, so the page
+// follows the system again from then on.
+function toggleTheme() {
+  const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  if (next === systemTheme()) localStorage.removeItem("webconsole_theme");
+  else localStorage.setItem("webconsole_theme", next);
+  applyTheme(next);
 }
 
 function bindEvents() {
-  $$(".tab[data-view]").forEach(button => button.addEventListener("click", () => {
-    $$(".tab[data-view]").forEach(item => item.classList.toggle("active", item === button));
-    $$(".view").forEach(view => view.classList.toggle("active", view.id === `view-${button.dataset.view}`));
-    if (button.dataset.view === "events") loadEvents().catch(error => toast(error.message));
-    if (button.dataset.view === "diagnostics") loadDiagnostics().catch(error => toast(error.message));
-    if (button.dataset.view === "storage") loadStorage().catch(error => toast(error.message));
-    if (button.dataset.view === "system") {
-      Promise.all([loadSystemStatus(), loadSystemHistory(state.systemWindow)]).catch(error => toast(error.message));
-    }
+  const fail = error => toast(error.message);
+
+  $$(".nav-item").forEach(item => item.addEventListener("click", () => {
+    showView(item.dataset.view);
+    loadView(item.dataset.view).catch(fail);
   }));
-  $("#event-filters").addEventListener("submit", event => {
-    event.preventDefault();
-    state.eventCursor = "";
-    loadEvents().catch(error => toast(error.message));
+
+  const eventForm = $("#event-filters");
+  eventForm.addEventListener("submit", event => event.preventDefault());
+  eventForm.addEventListener("change", event => {
+    if (event.target.name === "quick_time") {
+      const custom = event.target.value === "custom";
+      $(".custom-range", eventForm).hidden = !custom;
+      if (custom) {
+        // Start the custom range from the window that was just showing.
+        eventForm.elements.from.value = partsToInput(gmt8Parts(new Date(Date.now() - 24 * 3600000)));
+        eventForm.elements.to.value = partsToInput(gmt8Parts());
+      }
+    }
+    resetEvents().catch(fail);
   });
-  $('#event-filters select[name="quick_time"]').addEventListener("change", event => setQuickRange(event.target.value));
-  for (const name of ["from", "to"]) {
-    $(`#event-filters input[name="${name}"]`).addEventListener("input", () => {
-      $('#event-filters select[name="quick_time"]').value = "custom";
-    });
-  }
-  $("#clear-filters").addEventListener("click", () => {
-    $("#event-filters").reset();
-    setQuickRange("24h");
-    loadEvents().catch(error => toast(error.message));
+  $("#reset-event-filters").addEventListener("click", () => {
+    eventForm.reset();
+    $(".custom-range", eventForm).hidden = true;
+    resetEvents().catch(fail);
   });
-  $("#load-more").addEventListener("click", () => loadEvents({ append: true }).catch(error => toast(error.message)));
-  $("#diagnostic-filters").addEventListener("submit", event => {
-    event.preventDefault();
-    state.diagnosticCursor = "";
-    loadDiagnostics().catch(error => toast(error.message));
-  });
-  $("#diagnostic-more").addEventListener("click", () => loadDiagnostics({ append: true }).catch(error => toast(error.message)));
+  $("#load-more").addEventListener("click", () => loadEvents({ append: true }).catch(fail));
+
+  const diagnosticForm = $("#diagnostic-filters");
+  diagnosticForm.addEventListener("submit", event => event.preventDefault());
+  diagnosticForm.addEventListener("change", () => loadDiagnostics().catch(fail));
+
   $("#cleanup-period").addEventListener("change", updateCleanupCutoff);
   $("#cleanup-cutoff").addEventListener("input", () => {
     $("#cleanup-period").value = "custom";
     updateCleanupCutoff();
   });
-  $("#preview-cleanup").addEventListener("click", () => previewCleanup().catch(error => toast(error.message)));
-  $("#execute-cleanup").addEventListener("click", () => executeCleanup().catch(error => toast(error.message)));
+  $("#preview-cleanup").addEventListener("click", () => previewCleanup().catch(fail));
+  $("#execute-cleanup").addEventListener("click", () => executeCleanup().catch(fail));
   $("#reclaim-storage").addEventListener("click", async () => {
     try {
       await mutation("/api/storage/reclaim", {});
-      toast("增量空间回收完成");
+      toast("空闲页已回收");
       await loadStorage();
-    } catch (error) { toast(error.message); }
+    } catch (error) { fail(error); }
   });
 
-  // Chart range selector buttons
-  $$("#chart-range-selector .chart-range-btn").forEach(button => {
-    button.addEventListener("click", () => {
-      $$("#chart-range-selector .chart-range-btn").forEach(b => b.classList.toggle("active", b === button));
-      state.systemWindow = button.dataset.window || "1h";
-      loadSystemHistory(state.systemWindow).catch(error => toast(error.message));
-    });
-  });
+  $$("#chart-range button").forEach(button => button.addEventListener("click", () => {
+    $$("#chart-range button").forEach(item => item.classList.toggle("active", item === button));
+    state.systemWindow = button.dataset.window;
+    loadSystemHistory().catch(fail);
+  }));
 
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      if ($(".tab.active")?.dataset.view === "system" && state.systemHistoryData) {
-        loadSystemHistory(state.systemWindow).catch(() => {});
-      }
+      if (activeView() === "system" && state.systemHistory) renderCharts();
     }, 150);
   });
 
-  $("#copy-raw-btn").addEventListener("click", () => {
-    const text = $("#raw-content").textContent;
-    if (text) {
-      navigator.clipboard.writeText(text).then(() => toast("已复制到剪贴板")).catch(() => toast("复制失败"));
-    }
+  $("#copy-raw").addEventListener("click", () => {
+    navigator.clipboard.writeText($("#raw-content").textContent)
+      .then(() => toast("已复制"))
+      .catch(() => toast("复制失败，浏览器没有授予剪贴板权限"));
   });
-  $("#toggle-event-filters").addEventListener("click", () => {
-    const grid = $("#event-filters .filter-grid");
-    const isHidden = getComputedStyle(grid).display === "none";
-    grid.style.display = isHidden ? "grid" : "none";
-    $("#toggle-event-filters").textContent = isHidden ? "收起筛选" : "展开筛选";
-  });
+
   $("#theme-toggle").addEventListener("click", toggleTheme);
-}
-
-function getTheme() {
-  return document.documentElement.getAttribute("data-theme") || "dark";
-}
-
-function setTheme(theme) {
-  document.documentElement.setAttribute("data-theme", theme);
-  localStorage.setItem("webconsole_theme", theme);
-  $('meta[name="color-scheme"]').setAttribute("content", theme === "light" ? "light dark" : "dark light");
-  if ($(".tab.active")?.dataset.view === "system" && state.systemHistoryData) {
-    loadSystemHistory(state.systemWindow).catch(() => {});
-  }
-}
-
-function toggleTheme() {
-  const current = getTheme();
-  const next = current === "light" ? "dark" : "light";
-  setTheme(next);
+  matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
+    if (!localStorage.getItem("webconsole_theme")) applyTheme(systemTheme());
+  });
+  document.addEventListener("visibilitychange", refreshVisibleView);
 }
 
 async function initialize() {
+  applyTheme(document.documentElement.getAttribute("data-theme"));
   bindEvents();
-  startClock();
-  setQuickRange("24h");
+  updateClock();
+  setInterval(updateClock, 1000);
   updateCleanupCutoff();
   try {
-    await Promise.all([loadFilters(), loadBotStatus(), loadEvents(), loadDiagnostics(), loadSystemStatus()]);
+    await Promise.all([loadFilters(), loadBotStatus(), loadOverview(), loadSystemStatus(), loadEvents()]);
   } catch (error) {
-    toast(`初始化失败：${error.message}`);
+    toast(`加载失败：${error.message}`);
   }
-  startPeriodicRefresh();
+  setInterval(refreshVisibleView, 3000);
 }
 
 document.addEventListener("DOMContentLoaded", initialize);

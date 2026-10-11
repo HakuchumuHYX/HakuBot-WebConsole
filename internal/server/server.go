@@ -67,8 +67,9 @@ func (s *Server) routes(static http.Handler) {
 	}
 	s.mux.HandleFunc("GET /api/filters", s.filters)
 	s.mux.HandleFunc("GET /api/stats", s.stats)
+	s.mux.HandleFunc("GET /api/overview", s.overview)
 	s.mux.HandleFunc("GET /api/bot-status", s.botStatus)
-	s.mux.HandleFunc("GET /api/diagnostics", s.listDiagnostics)
+	s.mux.HandleFunc("GET /api/diagnostics/groups", s.diagnosticGroups)
 	s.mux.HandleFunc("GET /api/diagnostics/{id}", s.downloadDiagnostic)
 	s.mux.HandleFunc("GET /api/storage", s.storageStats)
 	s.mux.HandleFunc("GET /api/system/status", s.systemStatus)
@@ -260,6 +261,15 @@ func (s *Server) stats(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, stats)
 }
 
+func (s *Server) overview(writer http.ResponseWriter, request *http.Request) {
+	overview, err := s.repository.Overview(request.Context(), time.Now())
+	if err != nil {
+		s.internalError(writer, "query overview", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, overview)
+}
+
 func (s *Server) botStatus(
 	writer http.ResponseWriter,
 	request *http.Request,
@@ -283,7 +293,7 @@ func (s *Server) botStatus(
 	)
 }
 
-func (s *Server) listDiagnostics(
+func (s *Server) diagnosticGroups(
 	writer http.ResponseWriter,
 	request *http.Request,
 ) {
@@ -291,7 +301,6 @@ func (s *Server) listDiagnostics(
 	filters := query.DiagnosticFilters{
 		Level:  strings.TrimSpace(values.Get("level")),
 		Plugin: strings.TrimSpace(values.Get("plugin")),
-		Limit:  parseLimit(values.Get("limit")),
 	}
 	switch filters.Level {
 	case "", "WARNING", "ERROR", "CRITICAL":
@@ -312,17 +321,12 @@ func (s *Server) listDiagnostics(
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	filters.CursorMS, filters.CursorID, err = parseCursor(values.Get("cursor"))
+	groups, err := s.repository.DiagnosticGroups(request.Context(), filters)
 	if err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
+		s.internalError(writer, "group diagnostics", err)
 		return
 	}
-	page, err := s.repository.ListDiagnostics(request.Context(), filters)
-	if err != nil {
-		s.internalError(writer, "list diagnostics", err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, page)
+	writeJSON(writer, http.StatusOK, groups)
 }
 
 func (s *Server) storageStats(
