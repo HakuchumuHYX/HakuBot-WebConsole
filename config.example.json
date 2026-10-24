@@ -1,7 +1,6 @@
 {
   "listen": "127.0.0.1:54322",
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
-  "spool_path": "/var/lib/hakubot-webconsole/spool",
   "public_origin": "https://console.example.com",
   "retention_days": 90
 }

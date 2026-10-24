@@ -176,7 +176,6 @@
             <dl class="facts">
               <div><dt>数据库</dt><dd id="size-db">—</dd></div>
               <div><dt>WAL / SHM</dt><dd id="size-wal">—</dd></div>
-              <div><dt>待导入 spool</dt><dd id="size-spool">—</dd></div>
               <div><dt>响应记录</dt><dd id="response-records">—</dd></div>
               <div><dt>诊断记录</dt><dd id="diagnostic-records">—</dd></div>
               <div><dt>自动保留</dt><dd id="retention-policy">—</dd></div>
@@ -185,7 +184,7 @@
 
           <div class="panel padded">
             <h2 class="panel-title">清理旧日志</h2>
-            <p class="prose">删除截止时间之前的响应和诊断记录，并回收空间。Bot 状态和待导入的 spool 不受影响。删除后无法恢复。</p>
+            <p class="prose">删除截止时间之前的响应和诊断记录，并回收空间。Bot 状态不受影响。删除后无法恢复。</p>
             <div class="cleanup-fields">
               <label class="stack-field">截止到
                 <select id="cleanup-period">
@@ -204,7 +203,6 @@
             <div class="actions">
               <button id="preview-cleanup" class="button" type="button">预览</button>
               <button id="execute-cleanup" class="button danger" type="button" disabled>清理</button>
-              <button id="reclaim-storage" class="text-button" type="button">只回收空闲页</button>
             </div>
           </div>
         </div>

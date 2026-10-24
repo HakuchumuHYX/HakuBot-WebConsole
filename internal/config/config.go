@@ -13,7 +13,6 @@ import (
 type Config struct {
 	ListenAddress string `json:"listen"`
 	DatabasePath  string `json:"database_path"`
-	SpoolPath     string `json:"spool_path"`
 	PublicOrigin  string `json:"public_origin"`
 	RetentionDays int    `json:"retention_days"`
 }
@@ -39,8 +38,8 @@ func Load() (Config, error) {
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return Config{}, errors.New("listen must be a literal loopback IP address with port")
 	}
-	if !filepath.IsAbs(cfg.DatabasePath) || !filepath.IsAbs(cfg.SpoolPath) {
-		return Config{}, errors.New("database_path and spool_path must be absolute")
+	if !filepath.IsAbs(cfg.DatabasePath) {
+		return Config{}, errors.New("database_path must be absolute")
 	}
 	if cfg.PublicOrigin == "" {
 		return Config{}, errors.New("public_origin is required")

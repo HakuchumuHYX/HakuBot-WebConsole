@@ -6,7 +6,7 @@ StartLimitIntervalSec=60
 StartLimitBurst=10
 
 [Service]
-Type=notify
+Type=simple
 User=webconsole
 Group=webconsole
 WorkingDirectory=__INSTALL_ROOT__
@@ -14,8 +14,6 @@ ExecStart=__INSTALL_ROOT__/bin/webconsole
 Restart=always
 RestartSec=3
 TimeoutStopSec=15
-WatchdogSec=30
-NotifyAccess=main
 UMask=0007
 
 NoNewPrivileges=true

@@ -5,14 +5,23 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
-
-	"hakubot-webconsole/internal/timefmt"
+	_ "time/tzdata"
 )
+
+// Location is GMT+8: automatic retention runs at 04:15 there and counts
+// retention days by its calendar.
+var Location = mustLocation()
+
+func mustLocation() *time.Location {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		panic(err)
+	}
+	return location
+}
 
 var (
 	ErrBusy         = errors.New("storage maintenance is already running")
@@ -22,72 +31,58 @@ var (
 type Manager struct {
 	db            *sql.DB
 	databasePath  string
-	spoolPath     string
 	retentionDays int
 	maintenance   sync.Mutex
 }
 
-func NewManager(
-	db *sql.DB,
-	databasePath, spoolPath string,
-	retentionDays int,
-) *Manager {
+func NewManager(db *sql.DB, databasePath string, retentionDays int) *Manager {
 	return &Manager{
 		db:            db,
 		databasePath:  databasePath,
-		spoolPath:     spoolPath,
 		retentionDays: retentionDays,
 	}
 }
 
-// Stats holds file sizes as human-readable strings and time ranges in GMT+8;
-// ranges are empty when the table has no rows.
+// Stats holds file sizes in bytes; the time ranges are nil when the table has
+// no rows.
 type Stats struct {
-	Database           string `json:"database"`
-	WAL                string `json:"wal"`
-	SHM                string `json:"shm"`
-	Spool              string `json:"spool"`
-	SpoolFiles         int64  `json:"spool_files"`
-	ResponseCount      int64  `json:"response_count"`
-	DiagnosticCount    int64  `json:"diagnostic_count"`
-	ResponseEarliest   string `json:"response_earliest"`
-	ResponseLatest     string `json:"response_latest"`
-	DiagnosticEarliest string `json:"diagnostic_earliest"`
-	DiagnosticLatest   string `json:"diagnostic_latest"`
-	RetentionDays      int    `json:"retention_days"`
+	DatabaseBytes        int64  `json:"database_bytes"`
+	WALBytes             int64  `json:"wal_bytes"`
+	SHMBytes             int64  `json:"shm_bytes"`
+	ResponseCount        int64  `json:"response_count"`
+	DiagnosticCount      int64  `json:"diagnostic_count"`
+	ResponseEarliestMS   *int64 `json:"response_earliest_ms,omitempty"`
+	ResponseLatestMS     *int64 `json:"response_latest_ms,omitempty"`
+	DiagnosticEarliestMS *int64 `json:"diagnostic_earliest_ms,omitempty"`
+	DiagnosticLatestMS   *int64 `json:"diagnostic_latest_ms,omitempty"`
+	RetentionDays        int    `json:"retention_days"`
 }
 
 type Preview struct {
-	CutoffDisplay   string `json:"cutoff_display"`
-	ResponseCount   int64  `json:"response_count"`
-	DiagnosticCount int64  `json:"diagnostic_count"`
+	ResponseCount   int64 `json:"response_count"`
+	DiagnosticCount int64 `json:"diagnostic_count"`
 }
 
 type CleanupResult struct {
-	CutoffDisplay      string `json:"cutoff_display"`
-	ResponsesDeleted   int64  `json:"responses_deleted"`
-	DiagnosticsDeleted int64  `json:"diagnostics_deleted"`
+	Cutoff             time.Time `json:"-"`
+	ResponsesDeleted   int64     `json:"responses_deleted"`
+	DiagnosticsDeleted int64     `json:"diagnostics_deleted"`
 }
 
 func (m *Manager) Stats(ctx context.Context) (Stats, error) {
 	result := Stats{
-		Database:      fileSize(m.databasePath),
-		WAL:           fileSize(m.databasePath + "-wal"),
-		SHM:           fileSize(m.databasePath + "-shm"),
+		DatabaseBytes: fileSize(m.databasePath),
+		WALBytes:      fileSize(m.databasePath + "-wal"),
+		SHMBytes:      fileSize(m.databasePath + "-shm"),
 		RetentionDays: m.retentionDays,
 	}
-	spoolBytes, spoolFiles, err := directoryUsage(m.spoolPath)
-	if err != nil {
-		return Stats{}, fmt.Errorf("inspect spool: %w", err)
-	}
-	result.Spool = humanBytes(spoolBytes)
-	result.SpoolFiles = spoolFiles
-	result.ResponseCount, result.ResponseEarliest, result.ResponseLatest, err =
+	var err error
+	result.ResponseCount, result.ResponseEarliestMS, result.ResponseLatestMS, err =
 		m.tableRange(ctx, "response_events", "started_at_ms")
 	if err != nil {
 		return Stats{}, err
 	}
-	result.DiagnosticCount, result.DiagnosticEarliest, result.DiagnosticLatest, err =
+	result.DiagnosticCount, result.DiagnosticEarliestMS, result.DiagnosticLatestMS, err =
 		m.tableRange(ctx, "diagnostic_logs", "created_at_ms")
 	if err != nil {
 		return Stats{}, err
@@ -98,9 +93,9 @@ func (m *Manager) Stats(ctx context.Context) (Stats, error) {
 func (m *Manager) tableRange(
 	ctx context.Context,
 	table, timestampColumn string,
-) (int64, string, string, error) {
+) (int64, *int64, *int64, error) {
 	var count int64
-	var earliest, latest sql.NullInt64
+	var earliest, latest *int64
 	err := m.db.QueryRowContext(
 		ctx,
 		fmt.Sprintf(
@@ -111,15 +106,9 @@ func (m *Manager) tableRange(
 		),
 	).Scan(&count, &earliest, &latest)
 	if err != nil {
-		return 0, "", "", fmt.Errorf("count %s: %w", table, err)
+		return 0, nil, nil, fmt.Errorf("count %s: %w", table, err)
 	}
-	if count == 0 {
-		return 0, "", "", nil
-	}
-	return count,
-		timefmt.FormatMilliseconds(earliest.Int64),
-		timefmt.FormatMilliseconds(latest.Int64),
-		nil
+	return count, earliest, latest, nil
 }
 
 func (m *Manager) Preview(
@@ -130,7 +119,7 @@ func (m *Manager) Preview(
 		return Preview{}, ErrFutureCutoff
 	}
 	cutoffMS := cutoff.UnixMilli()
-	preview := Preview{CutoffDisplay: timefmt.FormatTime(cutoff)}
+	var preview Preview
 	if err := m.db.QueryRowContext(
 		ctx,
 		"SELECT COUNT(*) FROM response_events WHERE started_at_ms < ?",
@@ -178,22 +167,14 @@ func (m *Manager) Cleanup(
 	if err != nil {
 		return CleanupResult{}, err
 	}
-	if err := m.reclaimLocked(ctx); err != nil {
+	if err := m.reclaim(ctx); err != nil {
 		return CleanupResult{}, err
 	}
 	return CleanupResult{
-		CutoffDisplay:      timefmt.FormatTime(cutoff),
+		Cutoff:             cutoff,
 		ResponsesDeleted:   responses,
 		DiagnosticsDeleted: diagnostics,
 	}, nil
-}
-
-func (m *Manager) Reclaim(ctx context.Context) error {
-	if !m.maintenance.TryLock() {
-		return ErrBusy
-	}
-	defer m.maintenance.Unlock()
-	return m.reclaimLocked(ctx)
 }
 
 // RunAutomaticRetention deletes records older than retention_days; callers
@@ -202,12 +183,12 @@ func (m *Manager) RunAutomaticRetention(
 	ctx context.Context,
 	now time.Time,
 ) (CleanupResult, error) {
-	cutoff := now.In(timefmt.Location).AddDate(0, 0, -m.retentionDays)
+	cutoff := now.In(Location).AddDate(0, 0, -m.retentionDays)
 	return m.Cleanup(ctx, cutoff)
 }
 
 func NextAutomaticRun(now time.Time) time.Time {
-	local := now.In(timefmt.Location)
+	local := now.In(Location)
 	next := time.Date(
 		local.Year(),
 		local.Month(),
@@ -216,7 +197,7 @@ func NextAutomaticRun(now time.Time) time.Time {
 		15,
 		0,
 		0,
-		timefmt.Location,
+		Location,
 	)
 	if !next.After(local) {
 		next = next.AddDate(0, 0, 1)
@@ -267,7 +248,8 @@ func (m *Manager) deleteBatches(
 	}
 }
 
-func (m *Manager) reclaimLocked(ctx context.Context) error {
+// reclaim returns the pages freed by the deletes to the filesystem.
+func (m *Manager) reclaim(ctx context.Context) error {
 	if _, err := m.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
 		return fmt.Errorf("WAL checkpoint: %w", err)
 	}
@@ -278,54 +260,10 @@ func (m *Manager) reclaimLocked(ctx context.Context) error {
 }
 
 // fileSize reports a missing file (e.g. no WAL yet) as zero.
-func fileSize(path string) string {
+func fileSize(path string) int64 {
 	info, err := os.Stat(path)
 	if err != nil {
-		return humanBytes(0)
+		return 0
 	}
-	return humanBytes(info.Size())
-}
-
-func directoryUsage(path string) (int64, int64, error) {
-	var bytes, files int64
-	err := filepath.WalkDir(path, func(
-		_ string,
-		entry fs.DirEntry,
-		err error,
-	) error {
-		if err != nil {
-			return err
-		}
-		if !entry.IsDir() {
-			info, infoErr := entry.Info()
-			if infoErr != nil {
-				return infoErr
-			}
-			bytes += info.Size()
-			files++
-		}
-		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, 0, nil
-	}
-	return bytes, files, err
-}
-
-func humanBytes(value int64) string {
-	const unit = 1024
-	if value < unit {
-		return fmt.Sprintf("%d B", value)
-	}
-	divisor := int64(unit)
-	exponent := 0
-	for quotient := value / unit; quotient >= unit; quotient /= unit {
-		divisor *= unit
-		exponent++
-	}
-	return fmt.Sprintf(
-		"%.1f %ciB",
-		float64(value)/float64(divisor),
-		"KMGTPE"[exponent],
-	)
+	return info.Size()
 }

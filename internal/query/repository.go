@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
-
-	"hakubot-webconsole/internal/timefmt"
 )
 
 type Repository struct {
@@ -33,9 +30,10 @@ type EventFilters struct {
 	Limit    int
 }
 
+// Times are Unix milliseconds throughout; the frontend formats them in GMT+8.
 type EventSummary struct {
 	ID              int64  `json:"id"`
-	TimeDisplay     string `json:"time_display"`
+	StartedAtMS     int64  `json:"started_at_ms"`
 	Status          string `json:"status"`
 	PluginName      string `json:"plugin_name,omitempty"`
 	ModuleName      string `json:"module_name,omitempty"`
@@ -45,7 +43,6 @@ type EventSummary struct {
 	ResponseSummary string `json:"response_summary"`
 	DurationMS      *int64 `json:"duration_ms,omitempty"`
 	MaxLogLevel     string `json:"max_log_level,omitempty"`
-	startedAtMS     int64
 }
 
 type EventPage struct {
@@ -80,7 +77,7 @@ func (r *Repository) ListEvents(
 		var duration sql.NullInt64
 		if err := rows.Scan(
 			&item.ID,
-			&item.startedAtMS,
+			&item.StartedAtMS,
 			&item.Status,
 			&item.PluginName,
 			&item.ModuleName,
@@ -96,7 +93,6 @@ func (r *Repository) ListEvents(
 		if duration.Valid {
 			item.DurationMS = &duration.Int64
 		}
-		item.TimeDisplay = timefmt.FormatMilliseconds(item.startedAtMS)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -107,7 +103,7 @@ func (r *Repository) ListEvents(
 	if len(items) > filters.Limit {
 		last := items[filters.Limit-1]
 		page.Items = items[:filters.Limit]
-		page.NextCursor = EncodeCursor(last.startedAtMS, last.ID)
+		page.NextCursor = EncodeCursor(last.StartedAtMS, last.ID)
 	}
 	return page, nil
 }
@@ -154,8 +150,8 @@ func buildEventWhere(filters EventFilters) (string, []any) {
 }
 
 type EventDetail struct {
-	TimeDisplay        string `json:"time_display"`
-	FinishedDisplay    string `json:"finished_display,omitempty"`
+	StartedAtMS        int64  `json:"started_at_ms"`
+	FinishedAtMS       *int64 `json:"finished_at_ms,omitempty"`
 	Status             string `json:"status"`
 	PluginName         string `json:"plugin_name,omitempty"`
 	ModuleName         string `json:"module_name,omitempty"`
@@ -182,8 +178,7 @@ func (r *Repository) GetEvent(
 	id int64,
 ) (EventDetail, error) {
 	var detail EventDetail
-	var startedAtMS int64
-	var duration, matcherLine, finished sql.NullInt64
+	var duration, matcherLine sql.NullInt64
 	err := r.db.QueryRowContext(
 		ctx,
 		`SELECT started_at_ms, finished_at_ms, status,
@@ -200,8 +195,8 @@ func (r *Repository) GetEvent(
 		   FROM response_events WHERE id = ?`,
 		id,
 	).Scan(
-		&startedAtMS,
-		&finished,
+		&detail.StartedAtMS,
+		&detail.FinishedAtMS,
 		&detail.Status,
 		&detail.PluginName,
 		&detail.ModuleName,
@@ -224,10 +219,6 @@ func (r *Repository) GetEvent(
 	)
 	if err != nil {
 		return EventDetail{}, fmt.Errorf("get event: %w", err)
-	}
-	detail.TimeDisplay = timefmt.FormatMilliseconds(startedAtMS)
-	if finished.Valid {
-		detail.FinishedDisplay = timefmt.FormatMilliseconds(finished.Int64)
 	}
 	if duration.Valid {
 		detail.DurationMS = &duration.Int64
@@ -367,6 +358,8 @@ func (r *Repository) Filters(ctx context.Context) (Filters, error) {
 	if err != nil {
 		return Filters{}, fmt.Errorf("list groups: %w", err)
 	}
+	// The bridge always sets diagnostic_logs.plugin_name (plugin, or else the
+	// top-level logger such as nonebot or apscheduler).
 	plugins, err := distinctStrings(
 		ctx,
 		r.db,
@@ -374,37 +367,11 @@ func (r *Repository) Filters(ctx context.Context) (Filters, error) {
 		  WHERE plugin_name IS NOT NULL AND plugin_name != ''
 		 UNION
 		 SELECT plugin_name FROM diagnostic_logs
-		  WHERE plugin_name IS NOT NULL AND plugin_name != ''
 		  ORDER BY plugin_name`,
 	)
 	if err != nil {
 		return Filters{}, fmt.Errorf("list plugins: %w", err)
 	}
-	loggerNames, err := distinctStrings(
-		ctx,
-		r.db,
-		`SELECT DISTINCT logger_name FROM diagnostic_logs
-		  WHERE (plugin_name IS NULL OR plugin_name = '')
-		    AND logger_name IS NOT NULL AND logger_name != ''
-		  ORDER BY logger_name`,
-	)
-	if err != nil {
-		return Filters{}, fmt.Errorf("list diagnostic origins: %w", err)
-	}
-	pluginSet := make(map[string]struct{}, len(plugins)+len(loggerNames))
-	for _, plugin := range plugins {
-		pluginSet[plugin] = struct{}{}
-	}
-	for _, loggerName := range loggerNames {
-		if plugin := diagnosticPluginFromLogger(loggerName); plugin != "" {
-			pluginSet[plugin] = struct{}{}
-		}
-	}
-	plugins = plugins[:0]
-	for plugin := range pluginSet {
-		plugins = append(plugins, plugin)
-	}
-	sort.Strings(plugins)
 	return Filters{Groups: groups, Plugins: plugins}, nil
 }
 
@@ -441,8 +408,7 @@ func (r *Repository) BotStatus(
 	rows, err := r.db.QueryContext(
 		ctx,
 		`SELECT bot_id, connected, connection_started_at_ms,
-		        last_heartbeat_at_ms, heartbeat_online, heartbeat_good,
-		        collector_heartbeat_at_ms
+		        last_heartbeat_at_ms, heartbeat_online, heartbeat_good
 		   FROM bot_status ORDER BY bot_id`,
 	)
 	if err != nil {
@@ -456,7 +422,6 @@ func (r *Repository) BotStatus(
 		var connected int
 		var connectionStarted, heartbeatAt sql.NullInt64
 		var heartbeatOnline, heartbeatGood sql.NullInt64
-		var collectorHeartbeat int64
 		if err := rows.Scan(
 			&status.BotID,
 			&connected,
@@ -464,11 +429,11 @@ func (r *Repository) BotStatus(
 			&heartbeatAt,
 			&heartbeatOnline,
 			&heartbeatGood,
-			&collectorHeartbeat,
 		); err != nil {
 			return nil, fmt.Errorf("scan bot status: %w", err)
 		}
-		collectorFresh := nowMS-collectorHeartbeat <= 45_000
+		// NapCat sends a heartbeat every 30s through HakuBot, so a stale one
+		// means either side is gone; a fresh connection gets the same grace.
 		heartbeatFresh := heartbeatAt.Valid &&
 			nowMS-heartbeatAt.Int64 <= 90_000
 		heartbeatGrace := !heartbeatAt.Valid &&
@@ -478,9 +443,7 @@ func (r *Repository) BotStatus(
 			(heartbeatFresh &&
 				heartbeatOnline.Valid && heartbeatOnline.Int64 == 1 &&
 				heartbeatGood.Valid && heartbeatGood.Int64 == 1)
-		status.Online = connected == 1 &&
-			collectorFresh &&
-			heartbeatHealthy
+		status.Online = connected == 1 && heartbeatHealthy
 		statuses = append(statuses, status)
 	}
 	return statuses, rows.Err()
@@ -494,21 +457,20 @@ type DiagnosticFilters struct {
 }
 
 type DiagnosticOccurrence struct {
-	ID          int64  `json:"id"`
-	TimeDisplay string `json:"time_display"`
+	ID          int64 `json:"id"`
+	CreatedAtMS int64 `json:"created_at_ms"`
 }
 
 type DiagnosticGroup struct {
-	Key          string                 `json:"key"`
-	Level        string                 `json:"level"`
-	PluginName   string                 `json:"plugin_name,omitempty"`
-	LoggerName   string                 `json:"logger_name,omitempty"`
-	Message      string                 `json:"message"`
-	Count        int                    `json:"count"`
-	LastMS       int64                  `json:"last_ms"`
-	LastDisplay  string                 `json:"last_display"`
-	FirstDisplay string                 `json:"first_display"`
-	Occurrences  []DiagnosticOccurrence `json:"occurrences"`
+	Key         string                 `json:"key"`
+	Level       string                 `json:"level"`
+	PluginName  string                 `json:"plugin_name,omitempty"`
+	LoggerName  string                 `json:"logger_name,omitempty"`
+	Message     string                 `json:"message"`
+	Count       int                    `json:"count"`
+	LastMS      int64                  `json:"last_ms"`
+	FirstMS     int64                  `json:"first_ms"`
+	Occurrences []DiagnosticOccurrence `json:"occurrences"`
 }
 
 type DiagnosticGroups struct {
@@ -529,17 +491,6 @@ const (
 // the same problem; collapsing digit runs is enough to group them.
 var digitRun = regexp.MustCompile(`\d+`)
 
-func diagnosticPluginFromLogger(loggerName string) string {
-	parts := strings.Split(strings.TrimSpace(loggerName), ".")
-	if len(parts) == 0 {
-		return ""
-	}
-	if parts[0] == "plugins" && len(parts) > 1 {
-		return parts[1]
-	}
-	return parts[0]
-}
-
 func (r *Repository) DiagnosticGroups(
 	ctx context.Context,
 	filters DiagnosticFilters,
@@ -551,28 +502,8 @@ func (r *Repository) DiagnosticGroups(
 		args = append(args, filters.Level)
 	}
 	if filters.Plugin != "" {
-		conditions = append(
-			conditions,
-			`(plugin_name = ? OR (
-				(plugin_name IS NULL OR plugin_name = '') AND (
-					logger_name = ?
-					OR substr(logger_name, 1, length(?) + 1) = ? || '.'
-					OR logger_name = 'plugins.' || ?
-					OR substr(logger_name, 1, length(?) + 9) =
-						'plugins.' || ? || '.'
-				)
-			))`,
-		)
-		args = append(
-			args,
-			filters.Plugin,
-			filters.Plugin,
-			filters.Plugin,
-			filters.Plugin,
-			filters.Plugin,
-			filters.Plugin,
-			filters.Plugin,
-		)
+		conditions = append(conditions, "plugin_name = ?")
+		args = append(args, filters.Plugin)
 	}
 	if filters.FromMS != nil {
 		conditions = append(conditions, "created_at_ms >= ?")
@@ -589,8 +520,7 @@ func (r *Repository) DiagnosticGroups(
 	rows, err := r.db.QueryContext(
 		ctx,
 		`SELECT id, created_at_ms, level,
-		        COALESCE(logger_name, ''), COALESCE(plugin_name, ''),
-		        message_summary
+		        COALESCE(logger_name, ''), plugin_name, message_summary
 		   FROM diagnostic_logs`+where+`
 		  ORDER BY created_at_ms DESC, id DESC`,
 		args...,
@@ -617,11 +547,7 @@ func (r *Repository) DiagnosticGroups(
 		); err != nil {
 			return DiagnosticGroups{}, fmt.Errorf("scan diagnostic: %w", err)
 		}
-		if pluginName == "" {
-			pluginName = diagnosticPluginFromLogger(loggerName)
-		}
 		result.Total++
-		display := timefmt.FormatMilliseconds(createdAtMS)
 		key := level + "\x00" + pluginName + "\x00" +
 			digitRun.ReplaceAllString(message, "#")
 		position, found := index[key]
@@ -638,22 +564,21 @@ func (r *Repository) DiagnosticGroups(
 			position = len(result.Groups)
 			index[key] = position
 			result.Groups = append(result.Groups, DiagnosticGroup{
-				Key:         fmt.Sprintf("%016x", hash.Sum64()),
-				Level:       level,
-				PluginName:  pluginName,
-				LoggerName:  loggerName,
-				Message:     message,
-				LastMS:      createdAtMS,
-				LastDisplay: display,
+				Key:        fmt.Sprintf("%016x", hash.Sum64()),
+				Level:      level,
+				PluginName: pluginName,
+				LoggerName: loggerName,
+				Message:    message,
+				LastMS:     createdAtMS,
 			})
 		}
 		group := &result.Groups[position]
 		group.Count++
-		group.FirstDisplay = display
+		group.FirstMS = createdAtMS
 		if len(group.Occurrences) < maxDiagnosticOccurrences {
 			group.Occurrences = append(
 				group.Occurrences,
-				DiagnosticOccurrence{ID: id, TimeDisplay: display},
+				DiagnosticOccurrence{ID: id, CreatedAtMS: createdAtMS},
 			)
 		}
 	}
@@ -664,19 +589,17 @@ func (r *Repository) DiagnosticGroups(
 }
 
 type RawPayload struct {
-	Compressed   []byte
-	SHA256       string
-	TimeDisplay  string
-	ContentType  string
-	FilenameStem string
+	Compressed  []byte
+	ContentType string
+	Filename    string
 }
 
-// EventRawColumns maps each downloadable part of an event to its blob and
-// hash columns; the HTTP layer registers one route per key.
-var EventRawColumns = map[string][2]string{
-	"input":  {"request_raw_gzip", "request_raw_sha256"},
-	"output": {"response_raw_gzip", "response_raw_sha256"},
-	"logs":   {"logs_raw_gzip", "logs_raw_sha256"},
+// EventRawColumns maps each downloadable part of an event to its blob column;
+// the HTTP layer registers one route per key.
+var EventRawColumns = map[string]string{
+	"input":  "request_raw_gzip",
+	"output": "response_raw_gzip",
+	"logs":   "logs_raw_gzip",
 }
 
 func (r *Repository) EventRaw(
@@ -684,23 +607,20 @@ func (r *Repository) EventRaw(
 	id int64,
 	part string,
 ) (RawPayload, error) {
-	blobColumn, hashColumn := EventRawColumns[part][0], EventRawColumns[part][1]
-	var payload RawPayload
-	var startedAtMS int64
+	column := EventRawColumns[part]
+	payload := RawPayload{
+		ContentType: "application/json; charset=utf-8",
+		Filename:    fmt.Sprintf("event-%d-%s.json", id, part),
+	}
 	err := r.db.QueryRowContext(
 		ctx,
-		`SELECT `+blobColumn+`, `+hashColumn+`, started_at_ms
-		   FROM response_events
-		  WHERE id = ? AND `+blobColumn+` IS NOT NULL
-		    AND `+hashColumn+` IS NOT NULL`,
+		`SELECT `+column+` FROM response_events
+		  WHERE id = ? AND `+column+` IS NOT NULL`,
 		id,
-	).Scan(&payload.Compressed, &payload.SHA256, &startedAtMS)
+	).Scan(&payload.Compressed)
 	if err != nil {
 		return RawPayload{}, err
 	}
-	payload.TimeDisplay = timefmt.FormatMilliseconds(startedAtMS)
-	payload.ContentType = "application/json; charset=utf-8"
-	payload.FilenameStem = fmt.Sprintf("event-%d-%s", id, part)
 	return payload, nil
 }
 
@@ -708,19 +628,17 @@ func (r *Repository) DiagnosticRaw(
 	ctx context.Context,
 	id int64,
 ) (RawPayload, error) {
-	var payload RawPayload
-	var createdAtMS int64
+	payload := RawPayload{
+		ContentType: "text/plain; charset=utf-8",
+		Filename:    fmt.Sprintf("diagnostic-%d.log", id),
+	}
 	err := r.db.QueryRowContext(
 		ctx,
-		`SELECT full_log_gzip, raw_sha256, created_at_ms
-		   FROM diagnostic_logs WHERE id = ?`,
+		`SELECT full_log_gzip FROM diagnostic_logs WHERE id = ?`,
 		id,
-	).Scan(&payload.Compressed, &payload.SHA256, &createdAtMS)
+	).Scan(&payload.Compressed)
 	if err != nil {
 		return RawPayload{}, err
 	}
-	payload.TimeDisplay = timefmt.FormatMilliseconds(createdAtMS)
-	payload.ContentType = "text/plain; charset=utf-8"
-	payload.FilenameStem = fmt.Sprintf("diagnostic-%d", id)
 	return payload, nil
 }

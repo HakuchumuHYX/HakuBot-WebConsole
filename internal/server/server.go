@@ -3,9 +3,7 @@ package server
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,15 +16,12 @@ import (
 	"strings"
 	"time"
 
-	"hakubot-webconsole/internal/database"
 	"hakubot-webconsole/internal/query"
 	"hakubot-webconsole/internal/storage"
 	"hakubot-webconsole/internal/sysmonitor"
-	"hakubot-webconsole/internal/timefmt"
 )
 
 type Server struct {
-	db           *sql.DB
 	repository   *query.Repository
 	storage      *storage.Manager
 	collector    *sysmonitor.Collector
@@ -35,7 +30,6 @@ type Server struct {
 }
 
 func New(
-	db *sql.DB,
 	repository *query.Repository,
 	storageManager *storage.Manager,
 	collector *sysmonitor.Collector,
@@ -43,7 +37,6 @@ func New(
 	static http.Handler,
 ) http.Handler {
 	server := &Server{
-		db:           db,
 		repository:   repository,
 		storage:      storageManager,
 		collector:    collector,
@@ -55,8 +48,6 @@ func New(
 }
 
 func (s *Server) routes(static http.Handler) {
-	s.mux.HandleFunc("GET /healthz", s.health)
-	s.mux.HandleFunc("GET /readyz", s.ready)
 	s.mux.HandleFunc("GET /api/events", s.listEvents)
 	s.mux.HandleFunc("GET /api/events/{id}", s.getEvent)
 	for part := range query.EventRawColumns {
@@ -79,7 +70,6 @@ func (s *Server) routes(static http.Handler) {
 		s.cleanupPreview,
 	)
 	s.mux.HandleFunc("POST /api/storage/cleanup", s.cleanup)
-	s.mux.HandleFunc("POST /api/storage/reclaim", s.reclaim)
 	s.mux.Handle("GET /", static)
 }
 
@@ -100,18 +90,6 @@ func securityHeaders(next http.Handler) http.Handler {
 		)
 		next.ServeHTTP(writer, request)
 	})
-}
-
-func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *Server) ready(writer http.ResponseWriter, request *http.Request) {
-	if err := database.Ready(request.Context(), s.db); err != nil {
-		writeError(writer, http.StatusServiceUnavailable, "not ready")
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) listEvents(
@@ -165,7 +143,7 @@ func (s *Server) downloadEventRaw(part string) http.HandlerFunc {
 			s.internalError(writer, "read event raw data", err)
 			return
 		}
-		s.serveVerifiedPayload(writer, payload, true)
+		s.servePayload(writer, payload, true)
 	}
 }
 
@@ -187,12 +165,12 @@ func (s *Server) downloadDiagnostic(
 		s.internalError(writer, "read diagnostic", err)
 		return
 	}
-	s.serveVerifiedPayload(writer, payload, false)
+	s.servePayload(writer, payload, false)
 }
 
-// serveVerifiedPayload decompresses fully and checks the stored SHA-256
-// before writing anything, so a corrupt payload never leaks partially.
-func (s *Server) serveVerifiedPayload(
+// servePayload decompresses fully before writing anything; reading to EOF
+// checks the gzip CRC, so a corrupt payload never leaks partially.
+func (s *Server) servePayload(
 	writer http.ResponseWriter,
 	payload query.RawPayload,
 	attachment bool,
@@ -207,32 +185,15 @@ func (s *Server) serveVerifiedPayload(
 		s.internalError(writer, "read diagnostic payload", err)
 		return
 	}
-	sum := sha256.Sum256(content)
-	if hex.EncodeToString(sum[:]) != payload.SHA256 {
-		s.internalError(
-			writer,
-			"verify diagnostic payload",
-			errors.New("SHA-256 mismatch"),
-		)
-		return
-	}
 
-	disposition, extension := "inline", "log"
+	disposition := "inline"
 	if attachment {
-		disposition, extension = "attachment", "json"
+		disposition = "attachment"
 	}
-	safeTime := strings.NewReplacer(" ", "_", ":", "-").
-		Replace(payload.TimeDisplay)
-	filename := fmt.Sprintf(
-		"%s_%s_GMT+8.%s",
-		payload.FilenameStem,
-		safeTime,
-		extension,
-	)
 	writer.Header().Set("Content-Type", payload.ContentType)
 	writer.Header().Set(
 		"Content-Disposition",
-		fmt.Sprintf(`%s; filename="%s"`, disposition, filename),
+		fmt.Sprintf(`%s; filename="%s"`, disposition, payload.Filename),
 	)
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(content)
@@ -342,7 +303,7 @@ func (s *Server) storageStats(
 }
 
 type cutoffRequest struct {
-	Cutoff string `json:"cutoff"`
+	CutoffMS int64 `json:"cutoff_ms"`
 }
 
 func (s *Server) cleanupPreview(
@@ -389,38 +350,13 @@ func (s *Server) cleanup(
 	slog.Info(
 		"webconsole storage cleanup completed",
 		"cutoff",
-		result.CutoffDisplay,
+		result.Cutoff,
 		"responses_deleted",
 		result.ResponsesDeleted,
 		"diagnostics_deleted",
 		result.DiagnosticsDeleted,
 	)
 	writeJSON(writer, http.StatusOK, result)
-}
-
-func (s *Server) reclaim(
-	writer http.ResponseWriter,
-	request *http.Request,
-) {
-	if !s.validateMutation(writer, request) {
-		return
-	}
-	var body struct{}
-	if err := decodeJSONBody(writer, request, &body); err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	err := s.storage.Reclaim(request.Context())
-	if errors.Is(err, storage.ErrBusy) {
-		writeError(writer, http.StatusConflict, err.Error())
-		return
-	}
-	if err != nil {
-		s.internalError(writer, "reclaim storage", err)
-		return
-	}
-	slog.Info("webconsole incremental storage reclaim completed")
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) parseCutoffMutation(
@@ -435,12 +371,11 @@ func (s *Server) parseCutoffMutation(
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return time.Time{}, false
 	}
-	cutoff, err := timefmt.Parse(body.Cutoff)
-	if err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid GMT+8 cutoff")
+	if body.CutoffMS <= 0 {
+		writeError(writer, http.StatusBadRequest, "invalid cutoff")
 		return time.Time{}, false
 	}
-	return cutoff, true
+	return time.UnixMilli(body.CutoffMS), true
 }
 
 // validateMutation blocks cross-site requests: browsers attach Basic Auth
@@ -526,23 +461,15 @@ func parseCursor(value string) (int64, int64, error) {
 	return query.DecodeCursor(value)
 }
 
+// parseTimeRange reads optional Unix-millisecond bounds.
 func parseTimeRange(from, to string) (*int64, *int64, error) {
-	var fromMS, toMS *int64
-	if strings.TrimSpace(from) != "" {
-		value, err := timefmt.Parse(from)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid from time: %w", err)
-		}
-		milliseconds := value.UnixMilli()
-		fromMS = &milliseconds
+	fromMS, err := parseOptionalMS(from)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid from time: %w", err)
 	}
-	if strings.TrimSpace(to) != "" {
-		value, err := timefmt.Parse(to)
-		if err != nil {
-			return nil, nil, fmt.Errorf("invalid to time: %w", err)
-		}
-		milliseconds := value.UnixMilli()
-		toMS = &milliseconds
+	toMS, err := parseOptionalMS(to)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid to time: %w", err)
 	}
 	if fromMS != nil && toMS != nil {
 		if *fromMS > *toMS {
@@ -554,6 +481,18 @@ func parseTimeRange(from, to string) (*int64, *int64, error) {
 		}
 	}
 	return fromMS, toMS, nil
+}
+
+func parseOptionalMS(value string) (*int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	milliseconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || milliseconds <= 0 {
+		return nil, errors.New("must be positive Unix milliseconds")
+	}
+	return &milliseconds, nil
 }
 
 func parseLimit(value string) int {

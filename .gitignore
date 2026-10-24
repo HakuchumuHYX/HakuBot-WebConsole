@@ -30,3 +30,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Plans and notes for this deployment.
+/docs/

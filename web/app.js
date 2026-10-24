@@ -8,7 +8,7 @@ const state = {
   diagnosticSignature: "",
   pulseSignature: "",
   openIssues: new Set(),
-  previewCutoff: "",
+  previewCutoff: 0,
   refreshInFlight: false,
   refreshErrorShown: false,
   systemWindow: "1h",
@@ -65,7 +65,7 @@ async function mutation(path, body) {
   });
 }
 
-/* GMT+8 time helpers. The API speaks "YYYY-M-D HH:MM:SS" in GMT+8. */
+/* GMT+8 time helpers. The API speaks Unix milliseconds; everything shown is GMT+8. */
 
 function gmt8Parts(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -82,20 +82,27 @@ function gmt8Date(date = new Date()) {
   return `${Number(p.year)}-${Number(p.month)}-${Number(p.day)}`;
 }
 
-// Browsers drop ":00" seconds from datetime-local values, so seconds are optional.
-function inputToAPI(value) {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
-  if (!match) return "";
-  return `${match[1]}-${Number(match[2])}-${Number(match[3])} ${match[4]}:${match[5]}:${match[6] || "00"}`;
+// "2026-1-2 15:04:05"; withYear false drops the year.
+function formatTime(ms, withYear = true) {
+  const p = gmt8Parts(new Date(ms));
+  const date = `${Number(p.month)}-${Number(p.day)}`;
+  return `${withYear ? `${Number(p.year)}-` : ""}${date} ${p.hour}:${p.minute}:${p.second}`;
+}
+
+function timeOfDay(ms) {
+  const p = gmt8Parts(new Date(ms));
+  return `${p.hour}:${p.minute}:${p.second}`;
+}
+
+// datetime-local values carry no zone; read them as GMT+8. Browsers drop
+// ":00" seconds, which Date.parse accepts. Returns NaN when incomplete.
+function inputToMs(value) {
+  return Date.parse(`${value}+08:00`);
 }
 
 function partsToInput(parts) {
   const pad = value => String(value).padStart(2, "0");
   return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
-}
-
-function hoursAgoAPI(hours) {
-  return inputToAPI(partsToInput(gmt8Parts(new Date(Date.now() - hours * 3600000))));
 }
 
 function calendarMonthsAgo(months) {
@@ -155,12 +162,12 @@ function eventParams() {
   }
   const range = form.elements.quick_time.value;
   if (range === "custom") {
-    const from = inputToAPI(form.elements.from.value);
-    const to = inputToAPI(form.elements.to.value);
+    const from = inputToMs(form.elements.from.value);
+    const to = inputToMs(form.elements.to.value);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
   } else {
-    params.set("from", hoursAgoAPI(HOURS[range]));
+    params.set("from", Date.now() - HOURS[range] * 3600000);
   }
   return params;
 }
@@ -194,7 +201,6 @@ function eventFlag(item) {
 const SLOW_MS = 10000;
 
 function eventRow(item, fresh) {
-  const [, time] = item.time_display.split(" ");
   const flag = eventFlag(item);
   const row = el("button", `row event-grid ${flag}${fresh ? " fresh" : ""}`);
   row.type = "button";
@@ -207,7 +213,7 @@ function eventRow(item, fresh) {
   if (item.duration_ms >= SLOW_MS) duration.classList.add("slow");
 
   row.append(
-    el("span", "cell-time", time),
+    el("span", "cell-time", timeOfDay(item.started_at_ms)),
     el("span", "cell-plugin", item.plugin_name || item.module_name || "未知插件"),
     el("span", "cell-id", item.group_id || "私聊"),
     el("span", "cell-id", item.user_id || "—"),
@@ -225,7 +231,7 @@ function renderEvents(flashNew) {
   list.replaceChildren();
   let currentDay = "";
   for (const item of state.events) {
-    const [date] = item.time_display.split(" ");
+    const date = gmt8Date(new Date(item.started_at_ms));
     if (date !== currentDay) {
       currentDay = date;
       list.append(el("li", "day-row", dayLabel(date)));
@@ -352,9 +358,9 @@ async function showEventDetail(id) {
     conversation.append(el("pre", "error-text", error));
   }
 
-  const finished = detail.finished_display?.split(" ")[1];
+  const finished = detail.finished_at_ms ? ` 至 ${timeOfDay(detail.finished_at_ms)}` : "";
   setMeta([
-    ["时间", `${detail.time_display}${finished ? ` 至 ${finished}` : ""}（GMT+8）`],
+    ["时间", `${formatTime(detail.started_at_ms)}${finished}（GMT+8）`],
     ["耗时", formatDuration(detail.duration_ms)],
     ["群", detail.group_id || "私聊"],
     ["用户", detail.user_id],
@@ -380,7 +386,7 @@ function showDiagnosticDetail(group, occurrence) {
   tag.textContent = LEVEL_LABELS[group.level];
   $("#detail-exchange").replaceChildren();
   setMeta([
-    ["时间", `${occurrence.time_display}（GMT+8）`],
+    ["时间", `${formatTime(occurrence.created_at_ms)}（GMT+8）`],
     ["Logger", group.logger_name, true],
   ]);
   setRaw([{ label: "完整日志", path: `/api/diagnostics/${occurrence.id}` }]);
@@ -395,7 +401,7 @@ function diagnosticParams() {
   if (form.elements.level.value) params.set("level", form.elements.level.value);
   if (form.elements.plugin.value) params.set("plugin", form.elements.plugin.value);
   const range = form.elements.quick_time.value;
-  if (range !== "all") params.set("from", hoursAgoAPI(HOURS[range]));
+  if (range !== "all") params.set("from", Date.now() - HOURS[range] * 3600000);
   return params;
 }
 
@@ -428,12 +434,12 @@ function issueItem(group, maxCount) {
 
   const body = el("div", "issue-body issue-grid");
   body.append(el("p", "", group.count > 1
-    ? `首次 ${group.first_display}，最近 ${group.last_display}。`
-    : `发生于 ${group.last_display}。`));
+    ? `首次 ${formatTime(group.first_ms)}，最近 ${formatTime(group.last_ms)}。`
+    : `发生于 ${formatTime(group.last_ms)}。`));
   const occurrences = el("ol", "occurrences");
   for (const occurrence of group.occurrences) {
     // The year is noise here; the dialog shows the full time.
-    const button = el("button", "", occurrence.time_display.replace(/^\d{4}-/, ""));
+    const button = el("button", "", formatTime(occurrence.created_at_ms, false));
     button.type = "button";
     button.addEventListener("click", () => showDiagnosticDetail(group, occurrence));
     const item = el("li");
@@ -589,13 +595,12 @@ function updateClock() {
 async function loadStorage() {
   const data = await (await api("/api/storage")).json();
   const records = (count, earliest, latest) => count
-    ? `${count} 条\n${earliest} 至 ${latest}`
+    ? `${count} 条\n${formatTime(earliest)} 至 ${formatTime(latest)}`
     : "没有记录";
-  $("#size-db").textContent = data.database;
-  $("#size-wal").textContent = `${data.wal} / ${data.shm}`;
-  $("#size-spool").textContent = `${data.spool}，${data.spool_files} 个文件`;
-  $("#response-records").textContent = records(data.response_count, data.response_earliest, data.response_latest);
-  $("#diagnostic-records").textContent = records(data.diagnostic_count, data.diagnostic_earliest, data.diagnostic_latest);
+  $("#size-db").textContent = formatBytes(data.database_bytes);
+  $("#size-wal").textContent = `${formatBytes(data.wal_bytes)} / ${formatBytes(data.shm_bytes)}`;
+  $("#response-records").textContent = records(data.response_count, data.response_earliest_ms, data.response_latest_ms);
+  $("#diagnostic-records").textContent = records(data.diagnostic_count, data.diagnostic_earliest_ms, data.diagnostic_latest_ms);
   $("#retention-policy").textContent = data.retention_days > 0
     ? `保留最近 ${data.retention_days} 天，每天 04:15（GMT+8）清理更早的记录`
     : "已关闭，只能手动清理";
@@ -604,28 +609,28 @@ async function loadStorage() {
 function updateCleanupCutoff() {
   const value = $("#cleanup-period").value;
   if (value !== "custom") $("#cleanup-cutoff").value = calendarMonthsAgo(Number(value));
-  state.previewCutoff = "";
+  state.previewCutoff = 0;
   $("#execute-cleanup").disabled = true;
   $("#execute-cleanup").textContent = "清理";
   $("#cleanup-preview").textContent = "先预览会删除多少条记录。";
 }
 
 async function previewCleanup() {
-  const cutoff = inputToAPI($("#cleanup-cutoff").value);
+  const cutoff = inputToMs($("#cleanup-cutoff").value);
   if (!cutoff) throw new Error("请填写完整的截止时间");
-  const { preview } = await (await mutation("/api/storage/cleanup/preview", { cutoff })).json();
+  const { preview } = await (await mutation("/api/storage/cleanup/preview", { cutoff_ms: cutoff })).json();
   state.previewCutoff = cutoff;
   $("#cleanup-preview").textContent =
-    `会删除 ${preview.cutoff_display}（GMT+8）之前的 ${preview.response_count} 条响应和 ${preview.diagnostic_count} 条诊断。`;
+    `会删除 ${formatTime(cutoff)}（GMT+8）之前的 ${preview.response_count} 条响应和 ${preview.diagnostic_count} 条诊断。`;
   $("#execute-cleanup").textContent = `清理 ${preview.response_count + preview.diagnostic_count} 条记录`;
   $("#execute-cleanup").disabled = false;
 }
 
 async function executeCleanup() {
-  if (!window.confirm(`永久删除 ${state.previewCutoff}（GMT+8）之前的日志？删除后无法恢复。`)) return;
+  if (!window.confirm(`永久删除 ${formatTime(state.previewCutoff)}（GMT+8）之前的日志？删除后无法恢复。`)) return;
   $("#execute-cleanup").disabled = true;
-  const data = await (await mutation("/api/storage/cleanup", { cutoff: state.previewCutoff })).json();
-  state.previewCutoff = "";
+  const data = await (await mutation("/api/storage/cleanup", { cutoff_ms: state.previewCutoff })).json();
+  state.previewCutoff = 0;
   $("#execute-cleanup").textContent = "清理";
   $("#cleanup-preview").textContent = `已清理 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断，空间已回收。`;
   toast("已清理");
@@ -719,7 +724,7 @@ function renderCharts() {
     yMax: 100,
     thresholds: true,
     formatY: percent,
-    tooltip: p => `${p.time_display}\nCPU ${p.cpu_percent.toFixed(1)}%，峰值 ${p.cpu_max.toFixed(1)}%`,
+    tooltip: p => `${formatTime(p.timestamp_ms)}\nCPU ${p.cpu_percent.toFixed(1)}%，峰值 ${p.cpu_max.toFixed(1)}%`,
   });
   renderChart("#chart-mem", {
     ...common,
@@ -727,7 +732,7 @@ function renderCharts() {
     yMax: 100,
     thresholds: true,
     formatY: percent,
-    tooltip: p => `${p.time_display}\n内存 ${p.memory_percent.toFixed(1)}%（${formatBytes(p.memory_used_bytes)}）`,
+    tooltip: p => `${formatTime(p.timestamp_ms)}\n内存 ${p.memory_percent.toFixed(1)}%（${formatBytes(p.memory_used_bytes)}）`,
   });
   const netMax = points.reduce((max, p) => Math.max(max, p.net_rx_bytes_per_sec, p.net_tx_bytes_per_sec), 0);
   renderChart("#chart-net", {
@@ -738,7 +743,7 @@ function renderCharts() {
     ],
     yMax: niceNetCeiling(netMax * 1.05),
     formatY: value => (value ? `${formatBytes(value, 0)}/s` : "0"),
-    tooltip: p => `${p.time_display}\n↓ ${formatBytes(p.net_rx_bytes_per_sec)}/s，↑ ${formatBytes(p.net_tx_bytes_per_sec)}/s`,
+    tooltip: p => `${formatTime(p.timestamp_ms)}\n↓ ${formatBytes(p.net_rx_bytes_per_sec)}/s，↑ ${formatBytes(p.net_tx_bytes_per_sec)}/s`,
   });
 }
 
@@ -936,13 +941,6 @@ function bindEvents() {
   });
   $("#preview-cleanup").addEventListener("click", () => previewCleanup().catch(fail));
   $("#execute-cleanup").addEventListener("click", () => executeCleanup().catch(fail));
-  $("#reclaim-storage").addEventListener("click", async () => {
-    try {
-      await mutation("/api/storage/reclaim", {});
-      toast("空闲页已回收");
-      await loadStorage();
-    } catch (error) { fail(error); }
-  });
 
   $$("#chart-range button").forEach(button => button.addEventListener("click", () => {
     $$("#chart-range button").forEach(item => item.classList.toggle("active", item === button));

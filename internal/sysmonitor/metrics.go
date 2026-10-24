@@ -129,10 +129,7 @@ func readMemStats() (memStats, error) {
 	}
 	defer file.Close()
 
-	var (
-		total, free, available, buffers, cached uint64
-		swapTotal, swapFree                     uint64
-	)
+	var total, available, swapTotal, swapFree uint64
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -152,14 +149,8 @@ func readMemStats() (memStats, error) {
 		switch key {
 		case "MemTotal":
 			total = valBytes
-		case "MemFree":
-			free = valBytes
 		case "MemAvailable":
 			available = valBytes
-		case "Buffers":
-			buffers = valBytes
-		case "Cached":
-			cached = valBytes
 		case "SwapTotal":
 			swapTotal = valBytes
 		case "SwapFree":
@@ -167,9 +158,6 @@ func readMemStats() (memStats, error) {
 		}
 	}
 
-	if available == 0 {
-		available = free + buffers + cached
-	}
 	used := uint64(0)
 	if total >= available {
 		used = total - available
@@ -204,9 +192,7 @@ type diskStats struct {
 func readDiskStats(path string) (diskStats, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
-		if err2 := syscall.Statfs("/", &stat); err2 != nil {
-			return diskStats{}, err
-		}
+		return diskStats{}, err
 	}
 	total := stat.Blocks * uint64(stat.Bsize)
 	free := stat.Bfree * uint64(stat.Bsize)

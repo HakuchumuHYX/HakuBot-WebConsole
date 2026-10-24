@@ -1,4 +1,5 @@
-/* Dark is the base; light only redefines variables (see PLAN.md). Warm
+/* Dark is the base; light only redefines the variables under
+   :root[data-theme="light"], so never add per-selector light overrides. Warm
    neutrals with one clay accent for "current" and focus; status colors are
    reserved for success, warning and failure. Panels separate by surface,
    not shadow. Mono is only for data: times, IDs, durations. */

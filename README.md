@@ -15,10 +15,10 @@ HakuBot WebConsole 是一个独立的 Go 网页服务，用来查看 HakuBot/Non
 - 对 WARNING、ERROR、CRITICAL 和失败响应保存完整输入、输出、日志及 traceback。
 - 警告与错误按插件、级别和消息归类（忽略消息里的数字），显示次数和最近出现时间。
 - 深色/浅色主题默认跟随系统，也可以手动切换。
-- SQLite、WAL 和磁盘 spool 持久化；存储页展示占用、记录时间范围和自动保留策略。
+- SQLite（WAL）存储；存储页展示占用、记录时间范围和自动保留策略。
 - 按自选 GMT+8 截止时间预览、清理并增量回收旧日志。
 - 服务器 CPU、内存、磁盘、网络的实时状态和 7 天历史曲线。
-- systemd watchdog、崩溃自动重启和 Nginx HTTPS 反向代理。
+- 崩溃自动重启和 Nginx HTTPS 反向代理。
 
 ## 两个仓库的边界
 
@@ -35,14 +35,16 @@ webconsole repository
 └── deploy/                      # 通用部署模板
 ```
 
-两个进程不通过 HTTP 逐事件推送。它们通过同一个 SQLite 文件和 spool 目录协作，
-因此两边配置的 `database_path` 和 `spool_path` 必须完全一致。
+两个进程不通过 HTTP 逐事件推送，只共享同一个 SQLite 文件：bridge 写，WebConsole 读，
+因此两边配置的 `database_path` 必须完全一致。
 
 WebConsole 每次启动时幂等执行 `internal/database/schema.sql`（`CREATE ... IF NOT EXISTS`），
-bridge 不自行建表，只检查它要写入的表是否存在。首次部署时建议先启动 WebConsole，再启动
-HakuBot。如果顺序相反，bridge 会在启动时 warning 一次，并在存储可用后自动恢复采集。
+bridge 不建表。首次部署必须先启动 WebConsole，再启动 HakuBot；库不存在时 bridge 会加载失败，
+HakuBot 日志里会有 `Failed to import "plugins.webconsole_bridge"`。运行中单条写入失败时，
+bridge 只记一条 warning 并丢掉这一行。
 
-`IF NOT EXISTS` 不会修改已存在的表。调整已有表结构时，需要单独写一次性 SQL 脚本手动执行。
+`IF NOT EXISTS` 不会修改已存在的表。调整已有表结构时，需要单独写一次性 SQL 脚本手动执行，
+并同步修改 bridge 写入的列。
 
 ## 要求
 
@@ -75,8 +77,6 @@ sudo useradd --system --gid webconsole --home-dir /nonexistent \
   --shell /usr/sbin/nologin webconsole
 sudo install -d -o webconsole -g webconsole -m 2770 \
   /var/lib/hakubot-webconsole
-sudo install -d -o webconsole -g webconsole -m 2770 \
-  /var/lib/hakubot-webconsole/spool
 ```
 
 如果 HakuBot 不以 root 运行，把它的服务用户加入 `webconsole` 组：
@@ -101,7 +101,6 @@ cp config.example.json config.json
 {
   "listen": "127.0.0.1:54322",
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
-  "spool_path": "/var/lib/hakubot-webconsole/spool",
   "public_origin": "https://console.example.com",
   "retention_days": 90
 }
@@ -113,7 +112,6 @@ cp config.example.json config.json
 | --- | --- |
 | `listen` | Go 后端监听地址，必须是字面量回环 IP |
 | `database_path` | SQLite 文件的绝对路径 |
-| `spool_path` | 高优先级完整诊断 spool 的绝对路径 |
 | `public_origin` | 浏览器实际访问的 HTTPS Origin（非 443 端口要带上端口）；清理接口只接受这个 Origin 发起的请求 |
 | `retention_days` | 自动保留天数；`0` 表示关闭自动清理 |
 
@@ -121,25 +119,21 @@ cp config.example.json config.json
 
 ## 4. 配置 HakuBot bridge
 
-在 HakuBot 仓库中执行：
+在 HakuBot 仓库中：
 
 ```bash
-cd plugins/webconsole_bridge
-cp config.example.json config.json
+cp config-example/webconsole_bridge/config.json config/plugins/webconsole_bridge/config.json
 ```
 
-填写：
+只有一个字段，写数据库的绝对路径：
 
 ```json
 {
-  "enabled": true,
-  "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
-  "spool_path": "/var/lib/hakubot-webconsole/spool",
-  "probe_interval_seconds": 60
+    "database_path": "/var/lib/hakubot-webconsole/webconsole.db"
 }
 ```
 
-`config.json` 是 HakuBot 本地运行配置，不进入 Git。路径必须是绝对路径。
+`config/` 是 HakuBot 本地运行配置，不进入 Git。
 
 ## 5. 首次启动
 
@@ -149,14 +143,7 @@ cp config.example.json config.json
 ./bin/webconsole
 ```
 
-本机检查：
-
-```bash
-curl http://127.0.0.1:54322/healthz
-curl http://127.0.0.1:54322/readyz
-```
-
-`/readyz` 成功后再启动 HakuBot。bridge 会探测 schema 和目录权限，并开始异步采集。
+日志出现 `HakuBot WebConsole started` 后再启动 HakuBot。
 
 ## 6. WebConsole systemd
 
@@ -179,7 +166,6 @@ sudo systemctl enable --now webconsole.service
 模板使用：
 
 - `Restart=always`
-- `WatchdogSec=30`
 - 受限 `webconsole` 用户
 - `ProtectSystem=strict`
 - 只允许写共享数据目录
@@ -255,8 +241,8 @@ bin/
 2. 构建 WebConsole。
 3. 创建共享数据目录和用户组。
 4. 从两个 `config.example.json` 生成各自的私有 `config.json`。
-5. 保证两边 SQLite 和 spool 路径一致。
-6. 启动 WebConsole，等待 `/readyz`。
+5. 保证两边的 `database_path` 一致。
+6. 启动 WebConsole，等日志出现 `HakuBot WebConsole started`。
 7. 启动 HakuBot。
 8. 安装 WebConsole systemd，以及 Nginx 子域名站点、证书和 Basic Auth。
 9. 把域名解析到新服务器，验证 HTTPS 和认证可用、`127.0.0.1:54322` 不可从公网访问、

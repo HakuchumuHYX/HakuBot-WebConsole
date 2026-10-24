@@ -8,8 +8,6 @@ import (
 	"runtime"
 	"sync"
 	"time"
-
-	"hakubot-webconsole/internal/timefmt"
 )
 
 const (
@@ -110,15 +108,15 @@ func (c *Collector) sampleOnce() MetricSample {
 
 	mem, err := readMemStats()
 	if err != nil {
-		slog.Debug("read mem stats failed", "error", err)
+		slog.Warn("read mem stats failed", "error", err)
 	}
 	disk, err := readDiskStats(c.diskPath)
 	if err != nil {
-		slog.Debug("read disk stats failed", "error", err)
+		slog.Warn("read disk stats failed", "error", err)
 	}
 	load, err := readLoadStats()
 	if err != nil {
-		slog.Debug("read load stats failed", "error", err)
+		slog.Warn("read load stats failed", "error", err)
 	}
 
 	sample := MetricSample{
@@ -196,7 +194,6 @@ func (c *Collector) Status() SystemStatus {
 
 type HistoryPoint struct {
 	TimestampMs      int64   `json:"timestamp_ms"`
-	TimeDisplay      string  `json:"time_display"`
 	CPUPercent       float64 `json:"cpu_percent"`
 	CPUMax           float64 `json:"cpu_max"`
 	MemoryPercent    float64 `json:"memory_percent"`
@@ -271,7 +268,6 @@ func (c *Collector) History(
 		); err != nil {
 			return HistoryResponse{}, err
 		}
-		point.TimeDisplay = timefmt.FormatMilliseconds(point.TimestampMs)
 		response.Points = append(response.Points, point)
 	}
 	return response, rows.Err()

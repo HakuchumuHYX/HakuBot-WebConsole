@@ -17,7 +17,6 @@ import (
 	"hakubot-webconsole/internal/server"
 	"hakubot-webconsole/internal/storage"
 	"hakubot-webconsole/internal/sysmonitor"
-	"hakubot-webconsole/internal/watchdog"
 	webassets "hakubot-webconsole/web"
 )
 
@@ -33,10 +32,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(cfg.SpoolPath, 0o750); err != nil {
-		return err
-	}
-
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
@@ -49,16 +44,10 @@ func run() error {
 	}
 	defer db.Close()
 
-	storageManager := storage.NewManager(
-		db,
-		cfg.DatabasePath,
-		cfg.SpoolPath,
-		cfg.RetentionDays,
-	)
+	storageManager := storage.NewManager(db, cfg.DatabasePath, cfg.RetentionDays)
 	sysCollector := sysmonitor.NewCollector(db, cfg.DatabasePath)
 
 	handler := server.New(
-		db,
 		query.NewRepository(db),
 		storageManager,
 		sysCollector,
@@ -80,7 +69,6 @@ func run() error {
 	}
 	defer listener.Close()
 
-	go watchdog.Start(ctx)
 	go sysCollector.Start(ctx)
 	if cfg.RetentionDays > 0 {
 		go runAutomaticRetention(ctx, storageManager)
@@ -89,9 +77,6 @@ func run() error {
 	go func() {
 		serverErrors <- httpServer.Serve(listener)
 	}()
-	if err := watchdog.Notify("READY=1"); err != nil {
-		slog.Warn("systemd ready notification failed", "error", err)
-	}
 	slog.Info(
 		"HakuBot WebConsole started",
 		"listen",
@@ -108,7 +93,6 @@ func run() error {
 		}
 	}
 
-	_ = watchdog.Notify("STOPPING=1")
 	shutdownContext, cancel := context.WithTimeout(
 		context.Background(),
 		10*time.Second,
@@ -138,7 +122,7 @@ func runAutomaticRetention(
 		slog.Info(
 			"automatic log retention completed",
 			"cutoff",
-			result.CutoffDisplay,
+			result.Cutoff,
 			"responses_deleted",
 			result.ResponsesDeleted,
 			"diagnostics_deleted",
