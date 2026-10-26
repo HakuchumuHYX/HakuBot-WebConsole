@@ -122,7 +122,7 @@ cp config.example.json config.json
 在 HakuBot 仓库中：
 
 ```bash
-cp config-example/webconsole_bridge/config.json config/plugins/webconsole_bridge/config.json
+cp config-example/webconsole_bridge/config.json config/webconsole_bridge/config.json
 ```
 
 只有一个字段，写数据库的绝对路径：
