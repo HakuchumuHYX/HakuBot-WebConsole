@@ -18,6 +18,7 @@ HakuBot WebConsole 是一个独立的 Go 网页服务，用来查看 HakuBot/Non
 - SQLite（WAL）存储；存储页展示占用、记录时间范围和自动保留策略。
 - 按自选 GMT+8 截止时间预览、清理并增量回收旧日志。
 - 服务器 CPU、内存、磁盘、网络的实时状态和 7 天历史曲线。
+- Autochat 页面：autochat 进程和 LLM 请求是否正常、她今天的时间线和各群活动、各群心情和 Token、每日整理结果、人生线和日记。
 - 崩溃自动重启和 Nginx HTTPS 反向代理。
 
 ## 两个仓库的边界
@@ -45,6 +46,19 @@ bridge 只记一条 warning 并丢掉这一行。
 
 `IF NOT EXISTS` 不会修改已存在的表。调整已有表结构时，需要单独写一次性 SQL 脚本手动执行，
 并同步修改 bridge 写入的列。
+
+## Autochat
+
+autochat（`HakuBot-autochat/plugins/nyaturingtest`）也用这个库，但和 bridge 分工不同：
+
+- 历史（`autochat_llm_calls`、`autochat_looks`、`autochat_maintenance_runs`）和 WARNING 起的日志
+  （`diagnostic_logs`）由 autochat 写，WebConsole 读，所以进程挂了也能看。
+- 当前状态只在 autochat 内存里，WebConsole 用 `autochat_url`、`autochat_token` 每 5 秒拉一次，
+  转发时原样透传，不解析内容。连不上时只在连上和断开时各记一条日志，页面显示最后一份快照。
+
+这三张表、`diagnostic_logs` 的列要和 autochat 的 `webconsole_store.py` 同步修改。
+autochat 启动时判断一次：库打不开或缺表就只打一条警告、不写库，聊天不受影响。所以升级时要先启动
+WebConsole 建表，再重启 autochat。「响应记录」和顶部 24 小时图只有 HakuBot。
 
 ## 要求
 
@@ -102,7 +116,9 @@ cp config.example.json config.json
   "listen": "127.0.0.1:54322",
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
   "public_origin": "https://console.example.com",
-  "retention_days": 90
+  "retention_days": 90,
+  "autochat_url": "http://127.0.0.1:12450",
+  "autochat_token": "CHANGE_ME"
 }
 ```
 
@@ -113,9 +129,12 @@ cp config.example.json config.json
 | `listen` | Go 后端监听地址，必须是字面量回环 IP |
 | `database_path` | SQLite 文件的绝对路径 |
 | `public_origin` | 浏览器实际访问的 HTTPS Origin（非 443 端口要带上端口）；清理接口只接受这个 Origin 发起的请求 |
-| `retention_days` | 自动保留天数；`0` 表示关闭自动清理 |
+| `retention_days` | 自动保留天数；`0` 表示关闭自动清理，同样作用于 Autochat 的三张表 |
+| `autochat_url` | autochat 的 NoneBot 地址 |
+| `autochat_token` | 和 autochat 的 `console_token` 相同 |
 
 程序只读取当前工作目录下的 `config.json`，systemd 模板通过 `WorkingDirectory` 指定工作目录。
+`autochat_token` 能读到聊天内容，`config.json` 建议设成 `root:webconsole` 0640。
 
 ## 4. 配置 HakuBot bridge
 
@@ -243,7 +262,7 @@ bin/
 4. 从两个 `config.example.json` 生成各自的私有 `config.json`。
 5. 保证两边的 `database_path` 一致。
 6. 启动 WebConsole，等日志出现 `HakuBot WebConsole started`。
-7. 启动 HakuBot。
+7. 启动 HakuBot 和 autochat（`config.json` 里的 `webconsole_db`、`console_token` 要和这边对应）。
 8. 安装 WebConsole systemd，以及 Nginx 子域名站点、证书和 Basic Auth。
 9. 把域名解析到新服务器，验证 HTTPS 和认证可用、`127.0.0.1:54322` 不可从公网访问、
    Bot 在线状态和实际事件响应正常。

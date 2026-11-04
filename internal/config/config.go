@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,8 @@ type Config struct {
 	DatabasePath  string `json:"database_path"`
 	PublicOrigin  string `json:"public_origin"`
 	RetentionDays int    `json:"retention_days"`
+	AutochatURL   string `json:"autochat_url"`
+	AutochatToken string `json:"autochat_token"`
 }
 
 // Load reads config.json from the working directory; systemd sets
@@ -46,6 +49,14 @@ func Load() (Config, error) {
 	}
 	if cfg.RetentionDays < 0 || cfg.RetentionDays > 3650 {
 		return Config{}, errors.New("retention_days must be between 0 and 3650")
+	}
+	cfg.AutochatURL = strings.TrimRight(cfg.AutochatURL, "/")
+	autochatURL, err := url.Parse(cfg.AutochatURL)
+	if err != nil || autochatURL.Scheme != "http" || autochatURL.Host == "" {
+		return Config{}, errors.New("autochat_url must be an http URL")
+	}
+	if cfg.AutochatToken == "" {
+		return Config{}, errors.New("autochat_token is required")
 	}
 	return cfg, nil
 }

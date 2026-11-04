@@ -78,6 +78,47 @@ CREATE TABLE IF NOT EXISTS host_metrics (
     net_tx_bytes_per_sec REAL NOT NULL
 ) STRICT;
 
+-- The autochat_* tables are written by the autochat process and only read
+-- and cleaned up here. One row per generate_json including its retries, or
+-- per embedding, rerank and web search request.
+CREATE TABLE IF NOT EXISTS autochat_llm_calls (
+    id INTEGER PRIMARY KEY,
+    created_at_ms INTEGER NOT NULL,
+    endpoint TEXT NOT NULL,
+    model TEXT NOT NULL,
+    session_id TEXT,
+    ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+    latency_ms INTEGER NOT NULL,
+    error_type TEXT
+) STRICT;
+
+-- One row per look at a group; batches it did not look at are not recorded.
+-- willing is NULL when the feedback model failed.
+CREATE TABLE IF NOT EXISTS autochat_looks (
+    id INTEGER PRIMARY KEY,
+    created_at_ms INTEGER NOT NULL,
+    group_id TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    unread INTEGER NOT NULL,
+    willing REAL,
+    threshold REAL NOT NULL,
+    self_share REAL NOT NULL,
+    muted INTEGER NOT NULL CHECK (muted IN (0, 1)),
+    speak INTEGER NOT NULL CHECK (speak IN (0, 1)),
+    focus TEXT,
+    react TEXT,
+    poke TEXT
+) STRICT;
+
+-- One row per nightly maintenance; detail_json is passed through untouched.
+CREATE TABLE IF NOT EXISTS autochat_maintenance_runs (
+    id INTEGER PRIMARY KEY,
+    started_at_ms INTEGER NOT NULL,
+    finished_at_ms INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('ok', 'partial')),
+    detail_json TEXT NOT NULL
+) STRICT;
+
 CREATE INDEX IF NOT EXISTS idx_response_events_started
     ON response_events(started_at_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_response_events_status_started
@@ -91,3 +132,12 @@ CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_created
     ON diagnostic_logs(created_at_ms DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_diagnostic_logs_level_created
     ON diagnostic_logs(level, created_at_ms DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_autochat_llm_calls_created
+    ON autochat_llm_calls(created_at_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_autochat_looks_created
+    ON autochat_looks(created_at_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_autochat_looks_group_created
+    ON autochat_looks(group_id, created_at_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_autochat_maintenance_started
+    ON autochat_maintenance_runs(started_at_ms DESC, id DESC);

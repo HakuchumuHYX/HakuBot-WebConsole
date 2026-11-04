@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"hakubot-webconsole/internal/autochat"
 	"hakubot-webconsole/internal/query"
 	"hakubot-webconsole/internal/storage"
 	"hakubot-webconsole/internal/sysmonitor"
@@ -25,6 +26,7 @@ type Server struct {
 	repository   *query.Repository
 	storage      *storage.Manager
 	collector    *sysmonitor.Collector
+	autochat     *autochat.Client
 	publicOrigin string
 	mux          *http.ServeMux
 }
@@ -33,6 +35,7 @@ func New(
 	repository *query.Repository,
 	storageManager *storage.Manager,
 	collector *sysmonitor.Collector,
+	autochatClient *autochat.Client,
 	publicOrigin string,
 	static http.Handler,
 ) http.Handler {
@@ -40,6 +43,7 @@ func New(
 		repository:   repository,
 		storage:      storageManager,
 		collector:    collector,
+		autochat:     autochatClient,
 		publicOrigin: publicOrigin,
 		mux:          http.NewServeMux(),
 	}
@@ -70,6 +74,14 @@ func (s *Server) routes(static http.Handler) {
 		s.cleanupPreview,
 	)
 	s.mux.HandleFunc("POST /api/storage/cleanup", s.cleanup)
+	s.mux.HandleFunc("GET /api/autochat", s.autochatStatus)
+	s.mux.HandleFunc("GET /api/autochat/activity", s.autochatActivity)
+	s.mux.HandleFunc("GET /api/autochat/history", s.autochatHistory)
+	s.mux.HandleFunc("GET /api/autochat/maintenance", s.autochatMaintenance)
+	s.mux.HandleFunc("GET /api/autochat/digest", s.autochatDigest)
+	s.mux.HandleFunc("GET /api/autochat/groups/{id}", s.autochatGroup)
+	s.mux.HandleFunc("GET /api/autochat/groups/{id}/tokens", s.autochatGroupTokens)
+	s.mux.HandleFunc("GET /api/autochat/groups/{id}/looks", s.autochatGroupLooks)
 	s.mux.Handle("GET /", static)
 }
 
@@ -355,6 +367,8 @@ func (s *Server) cleanup(
 		result.ResponsesDeleted,
 		"diagnostics_deleted",
 		result.DiagnosticsDeleted,
+		"autochat_deleted",
+		result.AutochatDeleted,
 	)
 	writeJSON(writer, http.StatusOK, result)
 }
@@ -528,6 +542,130 @@ func (s *Server) systemHistory(
 		return
 	}
 	writeJSON(writer, http.StatusOK, history)
+}
+
+func (s *Server) autochatStatus(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, s.autochat.Status())
+}
+
+// autochatActivity is separate from the status the sidebar polls every 3
+// seconds: it carries the life line and diaries and changes once a minute.
+func (s *Server) autochatActivity(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, s.autochat.Activity())
+}
+
+func (s *Server) autochatHistory(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	history, err := s.repository.AutochatHistory(request.Context(), time.Now())
+	if err != nil {
+		s.internalError(writer, "query autochat history", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, history)
+}
+
+func (s *Server) autochatMaintenance(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	runs, err := s.repository.AutochatMaintenance(request.Context())
+	if err != nil {
+		s.internalError(writer, "query autochat maintenance", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, runs)
+}
+
+func (s *Server) autochatDigest(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	day := request.URL.Query().Get("day")
+	if _, err := time.Parse(time.DateOnly, day); err != nil {
+		writeError(writer, http.StatusBadRequest, "day must be YYYY-MM-DD")
+		return
+	}
+	s.forwardAutochat(writer, request, "/digest?day="+day)
+}
+
+func (s *Server) autochatGroup(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	id, err := positiveID(request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid group id")
+		return
+	}
+	s.forwardAutochat(writer, request, fmt.Sprintf("/groups/%d", id))
+}
+
+func (s *Server) autochatGroupTokens(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	id, err := positiveID(request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid group id")
+		return
+	}
+	hours := request.URL.Query().Get("hours")
+	if hours != "24" && hours != "168" && hours != "720" {
+		writeError(writer, http.StatusBadRequest, "hours must be 24, 168 or 720")
+		return
+	}
+	s.forwardAutochat(
+		writer,
+		request,
+		fmt.Sprintf("/groups/%d/tokens?hours=%s", id, hours),
+	)
+}
+
+func (s *Server) autochatGroupLooks(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	id, err := positiveID(request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid group id")
+		return
+	}
+	var before int64
+	if value := request.URL.Query().Get("before"); value != "" {
+		if before, err = positiveID(value); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid before id")
+			return
+		}
+	}
+	looks, err := s.repository.AutochatLooks(
+		request.Context(),
+		strconv.FormatInt(id, 10),
+		before,
+	)
+	if err != nil {
+		s.internalError(writer, "query autochat looks", err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, looks)
+}
+
+// forwardAutochat relays one read-only request. Being unreachable is normal
+// while autochat restarts, so it is a 503 for the page and not logged.
+func (s *Server) forwardAutochat(
+	writer http.ResponseWriter,
+	request *http.Request,
+	path string,
+) {
+	status, body, err := s.autochat.Forward(request.Context(), path)
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(status)
+	_, _ = writer.Write(body)
 }
 
 func (s *Server) internalError(

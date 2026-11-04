@@ -29,6 +29,9 @@
         <button class="nav-item active" type="button" data-view="events" aria-current="page">
           <span>响应记录</span><span id="nav-events" class="nav-count"></span>
         </button>
+        <button class="nav-item" type="button" data-view="autochat">
+          <span class="nav-label"><span id="nav-autochat" class="status-dot"></span>Autochat</span>
+        </button>
         <button class="nav-item" type="button" data-view="diagnostics">
           <span>警告与错误</span><span id="nav-diagnostics" class="nav-count"></span>
         </button>
@@ -134,6 +137,69 @@
         <button id="load-more" class="more-button" type="button" hidden>加载更早的记录</button>
       </section>
 
+      <section id="view-autochat" class="view" aria-label="Autochat">
+        <p id="ac-offline" class="ac-offline" role="alert" hidden></p>
+
+        <div class="ac-top">
+          <div class="panel padded">
+            <h2 class="panel-title">进程</h2>
+            <p id="ac-process-state" class="ac-state"></p>
+            <dl id="ac-process" class="facts compact"></dl>
+          </div>
+          <div class="panel padded">
+            <div class="panel-head">
+              <h2 class="panel-title">LLM 请求</h2>
+              <button id="ac-errors" class="text-button" type="button" hidden></button>
+            </div>
+            <div class="ac-llm-head" aria-hidden="true">
+              <span></span><span class="num">近 1 小时</span><span class="num">平均</span><span>24 小时（柱高 = 请求数，红色 = 失败）</span>
+            </div>
+            <ul id="ac-llm" class="ac-llm"></ul>
+            <p id="ac-llm-empty" class="ac-note" hidden>还没有记录。autochat 配好 webconsole_db 并重启后才开始记。</p>
+            <p id="ac-outside" class="ac-note"></p>
+          </div>
+        </div>
+
+        <div class="panel padded ac-live">
+          <div class="panel-head">
+            <h2 class="panel-title">今天</h2>
+            <ul id="ac-legend" class="ac-legend" aria-label="图例">
+              <li><span class="ac-swatch mode-free"></span>有空</li>
+              <li><span class="ac-swatch mode-busy"></span>在忙</li>
+              <li><span class="ac-swatch mode-away"></span>放下手机</li>
+              <li><span class="ac-swatch mode-sleep"></span>睡觉</li>
+              <li><span class="ac-swatch ac-swatch-bar"></span>消息数</li>
+              <li><span class="ac-swatch ac-swatch-tick"></span>她开口</li>
+            </ul>
+          </div>
+          <div id="ac-now" class="ac-now"></div>
+          <div id="ac-today" class="tl"></div>
+        </div>
+
+        <div id="ac-groups" class="ac-groups ac-live"></div>
+
+        <div class="panels-2">
+          <div class="panel padded">
+            <h2 class="panel-title">每日整理</h2>
+            <p id="ac-maintenance-note" class="ac-note ac-warn" hidden></p>
+            <ul id="ac-maintenance" class="ac-runs"></ul>
+            <p id="ac-maintenance-empty" class="ac-note" hidden>还没有整理记录，每天 03:30 跑一次。</p>
+          </div>
+          <div class="panel padded ac-live">
+            <div class="panel-head">
+              <h2 class="panel-title">她</h2>
+              <div id="ac-tabs" class="range" role="group" aria-label="内容">
+                <button type="button" data-tab="life" class="active">人生线</button>
+                <button type="button" data-tab="diary">日记</button>
+                <button type="button" data-tab="sleep">睡眠</button>
+                <button type="button" data-tab="segments">今天各段</button>
+              </div>
+            </div>
+            <div id="ac-self" class="ac-self"></div>
+          </div>
+        </div>
+      </section>
+
       <section id="view-diagnostics" class="view" aria-label="警告与错误">
         <div class="toolbar">
           <form id="diagnostic-filters" class="filters">
@@ -178,13 +244,15 @@
               <div><dt>WAL / SHM</dt><dd id="size-wal">—</dd></div>
               <div><dt>响应记录</dt><dd id="response-records">—</dd></div>
               <div><dt>诊断记录</dt><dd id="diagnostic-records">—</dd></div>
+              <div><dt>LLM 请求</dt><dd id="llm-call-records">—</dd></div>
+              <div><dt>看群决策</dt><dd id="look-records">—</dd></div>
               <div><dt>自动保留</dt><dd id="retention-policy">—</dd></div>
             </dl>
           </div>
 
           <div class="panel padded">
             <h2 class="panel-title">清理旧日志</h2>
-            <p class="prose">删除截止时间之前的响应和诊断记录，并回收空间。Bot 状态不受影响。删除后无法恢复。</p>
+            <p class="prose">删除截止时间之前的响应、诊断和 Autochat 记录，并回收空间。Bot 状态不受影响。删除后无法恢复。</p>
             <div class="cleanup-fields">
               <label class="stack-field">截止到
                 <select id="cleanup-period">
@@ -293,6 +361,7 @@
     </div>
     <div class="dialog-body">
       <div id="detail-exchange" class="exchange"></div>
+      <div id="detail-custom" class="ac-detail"></div>
       <dl id="detail-meta" class="meta"></dl>
       <div id="raw-section" class="raw-section" hidden>
         <div class="raw-head">
@@ -307,6 +376,7 @@
     </div>
   </dialog>
 
+  <div id="ac-tip" class="ac-tip" role="tooltip" hidden></div>
   <div id="toast" class="toast" role="status" hidden></div>
   <script src="/app.js" defer></script>
 </body>

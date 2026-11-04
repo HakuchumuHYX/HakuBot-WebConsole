@@ -2,5 +2,7 @@
   "listen": "127.0.0.1:54322",
   "database_path": "/var/lib/hakubot-webconsole/webconsole.db",
   "public_origin": "https://console.example.com",
-  "retention_days": 90
+  "retention_days": 90,
+  "autochat_url": "http://127.0.0.1:12450",
+  "autochat_token": "CHANGE_ME"
 }

@@ -13,6 +13,9 @@ const state = {
   refreshErrorShown: false,
   systemWindow: "1h",
   systemHistory: null,
+  autochat: { status: null, activity: null, activityMs: 0, history: null, runs: [] },
+  acSignatures: {},
+  acTab: "life",
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -341,6 +344,7 @@ async function loadRaw(path) {
 
 async function showEventDetail(id) {
   const detail = await (await api(`/api/events/${id}`)).json();
+  $("#detail-custom").replaceChildren();
   $("#detail-title").textContent = detail.plugin_name || detail.module_name || "未知插件";
   const tag = $("#detail-tag");
   if (detail.status === "failure") {
@@ -380,6 +384,7 @@ async function showEventDetail(id) {
 }
 
 function showDiagnosticDetail(group, occurrence) {
+  $("#detail-custom").replaceChildren();
   $("#detail-title").textContent = group.plugin_name || "系统";
   const tag = $("#detail-tag");
   tag.className = `tag ${group.level.toLowerCase()}`;
@@ -601,6 +606,8 @@ async function loadStorage() {
   $("#size-wal").textContent = `${formatBytes(data.wal_bytes)} / ${formatBytes(data.shm_bytes)}`;
   $("#response-records").textContent = records(data.response_count, data.response_earliest_ms, data.response_latest_ms);
   $("#diagnostic-records").textContent = records(data.diagnostic_count, data.diagnostic_earliest_ms, data.diagnostic_latest_ms);
+  $("#llm-call-records").textContent = records(data.llm_call_count, data.llm_call_earliest_ms, data.llm_call_latest_ms);
+  $("#look-records").textContent = records(data.look_count, data.look_earliest_ms, data.look_latest_ms);
   $("#retention-policy").textContent = data.retention_days > 0
     ? `保留最近 ${data.retention_days} 天，每天 04:15（GMT+8）清理更早的记录`
     : "已关闭，只能手动清理";
@@ -621,8 +628,8 @@ async function previewCleanup() {
   const { preview } = await (await mutation("/api/storage/cleanup/preview", { cutoff_ms: cutoff })).json();
   state.previewCutoff = cutoff;
   $("#cleanup-preview").textContent =
-    `会删除 ${formatTime(cutoff)}（GMT+8）之前的 ${preview.response_count} 条响应和 ${preview.diagnostic_count} 条诊断。`;
-  $("#execute-cleanup").textContent = `清理 ${preview.response_count + preview.diagnostic_count} 条记录`;
+    `会删除 ${formatTime(cutoff)}（GMT+8）之前的 ${preview.response_count} 条响应、${preview.diagnostic_count} 条诊断和 ${preview.autochat_count} 条 Autochat 记录。`;
+  $("#execute-cleanup").textContent = `清理 ${preview.response_count + preview.diagnostic_count + preview.autochat_count} 条记录`;
   $("#execute-cleanup").disabled = false;
 }
 
@@ -632,7 +639,7 @@ async function executeCleanup() {
   const data = await (await mutation("/api/storage/cleanup", { cutoff_ms: state.previewCutoff })).json();
   state.previewCutoff = 0;
   $("#execute-cleanup").textContent = "清理";
-  $("#cleanup-preview").textContent = `已清理 ${data.responses_deleted} 条响应和 ${data.diagnostics_deleted} 条诊断，空间已回收。`;
+  $("#cleanup-preview").textContent = `已清理 ${data.responses_deleted} 条响应、${data.diagnostics_deleted} 条诊断和 ${data.autochat_deleted} 条 Autochat 记录，空间已回收。`;
   toast("已清理");
   await loadStorage();
 }
@@ -834,6 +841,803 @@ function renderChart(selector, { points, fromMs, toMs, series, yMax, thresholds,
   hit.addEventListener("touchend", hide);
 }
 
+/* Autochat. Current state is the last poll of the process and goes stale when
+   it is down; the LLM curve, decisions and maintenance come from the shared
+   database and stay live. Everything from the process is chat content, so it
+   only ever reaches the page through textContent. */
+
+const DAY_MS = 86400000;
+const MODE_LABELS = { free: "有空", busy: "在忙", away: "放下手机", sleep: "睡觉" };
+const SOURCE_LABELS = { due: "到点定的", said: "她在群里说的", called: "被叫到", start: "启动时定的", calm: "/calm" };
+const LLM_LABELS = {
+  chat: "Chat", feedback: "Feedback", background: "Background",
+  embedding: "Embedding", rerank: "Rerank", web_search: "联网搜索",
+};
+const LLM_ORDER = Object.keys(LLM_LABELS);
+const TRIGGER_LABELS = { relevant: "被点名", conversation: "接话", poke: "被戳", rhythm: "按节奏" };
+const QUIET_AFTER_MS = 15 * 60000;
+const MAINTENANCE_LATE_HOUR = 5;
+// Below this share of the day a segment's text would only be stray glyphs.
+const SEGMENT_LABEL_MIN_SHARE = 0.06;
+
+function hhmm(ms) {
+  const p = gmt8Parts(new Date(ms));
+  return `${p.hour}:${p.minute}`;
+}
+
+function monthDay(ms) {
+  const p = gmt8Parts(new Date(ms));
+  return `${p.month}-${p.day}`;
+}
+
+function isoDay(ms) {
+  const p = gmt8Parts(new Date(ms));
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function formatSpan(ms) {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return `${Math.max(0, Math.round(ms / 1000))} 秒`;
+  if (minutes < 60) return `${minutes} 分 ${Math.floor((ms % 60000) / 1000)} 秒`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+  return `${Math.floor(minutes / 1440)} 天 ${Math.floor((minutes % 1440) / 60)} 小时`;
+}
+
+function formatTokens(value) {
+  if (value < 10000) return String(value);
+  return `${(value / 10000).toFixed(value < 1000000 ? 1 : 0)} 万`;
+}
+
+// The page refreshes every 3 seconds; rebuilding only what changed keeps
+// keyboard focus and open tips in place.
+function acChanged(key, value) {
+  const signature = JSON.stringify(value);
+  if (state.acSignatures[key] === signature) return false;
+  state.acSignatures[key] = signature;
+  return true;
+}
+
+function withTip(element, text) {
+  const tip = $("#ac-tip");
+  const show = () => {
+    tip.textContent = text;
+    tip.hidden = false;
+    const box = element.getBoundingClientRect();
+    const half = tip.offsetWidth / 2;
+    tip.style.left = `${Math.max(half + 4, Math.min(innerWidth - half - 4, box.left + box.width / 2))}px`;
+    tip.style.top = `${box.top - 6}px`;
+  };
+  const hide = () => { tip.hidden = true; };
+  element.addEventListener("mouseenter", show);
+  element.addEventListener("mouseleave", hide);
+  element.addEventListener("focus", show);
+  element.addEventListener("blur", hide);
+  element.setAttribute("aria-label", text);
+  return element;
+}
+
+function groupTitle(id) {
+  const group = state.autochat.activity?.groups.find(item => item.id === id);
+  return group?.name || id;
+}
+
+function renderAcProcess() {
+  const { status, history } = state.autochat;
+  const overview = status.overview;
+  if (!acChanged("process", [
+    status.reachable, overview?.bots, overview?.started_at_ms,
+    overview?.groups.map(group => group.worker_alive), history?.warnings_24h, Math.floor(Date.now() / 60000),
+  ])) return;
+  const line = $("#ac-process-state");
+  line.className = `ac-state ${status.reachable ? "ok" : "bad"}`;
+  line.replaceChildren(el("span", "status-dot"), status.reachable ? "运行中" : "离线");
+
+  const pairs = [];
+  if (overview) {
+    pairs.push(["已运行", formatSpan(overview.now_ms - overview.started_at_ms)]);
+    pairs.push(["QQ", overview.bots.length ? `已连接 ${overview.bots.join("、")}` : "没有连接"]);
+    const alive = overview.groups.filter(group => group.worker_alive).length;
+    pairs.push(["群 worker", `${alive}/${overview.groups.length}`]);
+  }
+  setFacts($("#ac-process"), pairs);
+  if (history) {
+    const row = el("div");
+    const link = el("button", "text-button", `${history.warnings_24h} 条`);
+    link.type = "button";
+    link.addEventListener("click", showAutochatDiagnostics);
+    const value = el("dd");
+    value.append(link);
+    row.append(el("dt", "", "24h 警告"), value);
+    $("#ac-process").append(row);
+  }
+}
+
+function showAutochatDiagnostics() {
+  const form = $("#diagnostic-filters");
+  if (![...form.elements.plugin.options].some(option => option.value === "nyaturingtest")) {
+    form.elements.plugin.add(new Option("nyaturingtest", "nyaturingtest"));
+  }
+  form.elements.plugin.value = "nyaturingtest";
+  form.elements.quick_time.value = "24h";
+  form.elements.level.value = "";
+  showView("diagnostics");
+  loadDiagnostics().catch(error => toast(error.message));
+}
+
+function llmSpark(endpoint, fromMs) {
+  const spark = el("span", "ac-spark");
+  const byIndex = new Map(endpoint.hours.map(hour => [hour.index, hour]));
+  const max = Math.max(1, ...endpoint.hours.map(hour => hour.ok + hour.failed));
+  for (let index = 0; index < 24; index++) {
+    const hour = byIndex.get(index);
+    const start = fromMs + index * 3600000;
+    const label = `${hhmm(start)}–${hhmm(start + 3600000)}\n`
+      + (hour ? `成功 ${hour.ok}，失败 ${hour.failed}，平均 ${formatDuration(Math.round(hour.avg_latency_ms))}` : "没有请求");
+    const column = withTip(el("span", "ac-spark-col"), label);
+    if (hour) {
+      for (const [count, className] of [[hour.ok, "ok"], [hour.failed, "failed"]]) {
+        if (!count) continue;
+        const part = el("span", className);
+        part.style.height = `${(count / max) * 100}%`;
+        column.append(part);
+      }
+    }
+    spark.append(column);
+  }
+  return spark;
+}
+
+function renderAcLlm() {
+  const { status, history, activity } = state.autochat;
+  if (!history) return;
+  const live = new Map((status.overview?.llm || []).map(item => [item.name, item]));
+  if (acChanged("llm", [history.endpoints, history.from_ms, [...live.values()].map(item => item.circuit_remaining_seconds)])) {
+    const endpoints = [...history.endpoints].sort((a, b) => LLM_ORDER.indexOf(a.endpoint) - LLM_ORDER.indexOf(b.endpoint));
+    $("#ac-llm").replaceChildren(...endpoints.map(endpoint => {
+      const row = el("li");
+      const name = el("span", "ac-llm-name", LLM_LABELS[endpoint.endpoint] || endpoint.endpoint);
+      name.title = endpoint.model;
+      const counts = el("span", "num mono", `${endpoint.recent_ok}/${endpoint.recent_ok + endpoint.recent_failed}`);
+      if (endpoint.recent_failed) counts.classList.add("ac-warn");
+      const latency = el("span", "num mono", endpoint.recent_ok + endpoint.recent_failed ? formatDuration(Math.round(endpoint.recent_avg_ms)) : "—");
+      row.append(name, counts, latency, llmSpark(endpoint, history.from_ms));
+      const circuit = live.get(endpoint.endpoint)?.circuit_remaining_seconds;
+      if (circuit > 0) row.append(el("span", "tag failure", `熔断 ${circuit} 秒`));
+      return row;
+    }));
+    $("#ac-llm-empty").hidden = endpoints.length > 0;
+  }
+
+  const errors = $("#ac-errors");
+  errors.hidden = history.recent_errors.length === 0;
+  errors.textContent = `最近的错误（${history.recent_errors.length}）`;
+
+  const groupIds = new Set((activity?.groups || []).map(group => group.id));
+  const outside = (activity?.tokens || []).filter(item => !groupIds.has(item.session_id));
+  const total = outside.reduce((sum, item) => sum + item.total, 0);
+  $("#ac-outside").textContent = activity
+    ? `各群之外的 Token（状态、人设、表情包等）近 24 小时 ${formatTokens(total)}`
+    : "";
+}
+
+function showLlmErrors() {
+  const list = el("ul", "ac-list");
+  for (const item of state.autochat.history.recent_errors) {
+    const row = el("li");
+    row.append(
+      el("span", "mono", formatTime(item.created_at_ms, false)),
+      el("span", "", LLM_LABELS[item.endpoint] || item.endpoint),
+      el("span", "tag failure", item.error_type || "未知"),
+      el("span", "ac-dim", [item.session_id, item.model, formatDuration(item.latency_ms)].filter(Boolean).join("，")),
+    );
+    list.append(row);
+  }
+  const note = el("p", "ac-note", "原始错误信息在「警告与错误」里。");
+  openAcDialog("最近的 LLM 错误", "", "", [list, note]);
+}
+
+function segmentMode(segment) {
+  return segment.sleep ? "sleep" : segment.mode;
+}
+
+function statusBand(persona, dayStart, now) {
+  const band = el("div", "tl-band");
+  const percent = ms => `${((ms - dayStart) / DAY_MS) * 100}%`;
+  for (const segment of persona.timeline) {
+    const start = Math.max(segment.start_ms, dayStart);
+    const realEnd = segment.end_ms || now;
+    const end = Math.min(realEnd, dayStart + DAY_MS);
+    if (end <= start) continue;
+    const pastEnd = Math.min(end, Math.max(start, now));
+    const mode = segmentMode(segment);
+    const label = `${hhmm(segment.start_ms)}–${hhmm(realEnd)} ${MODE_LABELS[mode]}\n${segment.doing}\n${SOURCE_LABELS[segment.source] || segment.source}`;
+    if (pastEnd > start) {
+      const text = (pastEnd - start) / DAY_MS >= SEGMENT_LABEL_MIN_SHARE ? segment.doing : "";
+      const part = withTip(el("div", `tl-seg mode-${mode}`, text), label);
+      part.tabIndex = 0;
+      part.style.left = percent(start);
+      part.style.width = `${((pastEnd - start) / DAY_MS) * 100}%`;
+      band.append(part);
+    }
+    if (end > pastEnd) {
+      // The current segment past "now" is only her plan.
+      const planned = withTip(el("div", `tl-seg tl-planned mode-${mode}`), `${label}\n后面这段是预计`);
+      planned.style.left = percent(pastEnd);
+      planned.style.width = `${((end - pastEnd) / DAY_MS) * 100}%`;
+      band.append(planned);
+    }
+  }
+  return band;
+}
+
+function groupLane(group, dayStart, max) {
+  const lane = el("div", "tl-lane");
+  const speaks = new Map();
+  for (const ms of group.speaks) {
+    const index = Math.floor((ms - dayStart) / (DAY_MS / 48));
+    speaks.set(index, (speaks.get(index) || 0) + 1);
+    const tick = el("span", "tl-tick");
+    tick.style.left = `${((ms - dayStart) / DAY_MS) * 100}%`;
+    lane.append(tick);
+  }
+  group.buckets.forEach((count, index) => {
+    const start = dayStart + index * (DAY_MS / 48);
+    const column = withTip(
+      el("span", "tl-col"),
+      `${hhmm(start)}–${hhmm(start + DAY_MS / 48)}\n消息 ${count} 条，她开口 ${speaks.get(index) || 0} 次`,
+    );
+    if (count) {
+      const bar = el("span", "tl-bar");
+      bar.style.height = `${Math.max(6, (count / max) * 100)}%`;
+      column.append(bar);
+    }
+    lane.append(column);
+  });
+  return lane;
+}
+
+function renderAcToday() {
+  const { activity, status } = state.autochat;
+  const container = $("#ac-today");
+  if (!activity) {
+    if (acChanged("today", null)) container.replaceChildren(el("p", "empty", "还没有拿到过 autochat 的状态。"));
+    return;
+  }
+  const now = Date.now();
+  const dayStart = activity.day_start_ms;
+  if (!acChanged("today", [activity.personas.map(p => p.timeline), activity.groups, Math.floor(now / 60000)])) return;
+
+  const overviewGroups = new Map((status.overview?.groups || []).map(group => [group.id, group]));
+  const max = Math.max(1, ...activity.groups.flatMap(group => group.buckets));
+  const rows = [];
+  const laneRow = group => {
+    const label = el("button", "tl-label");
+    label.type = "button";
+    label.append(el("span", "tl-name", group.name || group.id), el("span", "tl-sub", `${group.messages} 条，她 ${group.speaks.length} 次`));
+    label.addEventListener("click", () => showAcGroup(group.id));
+    const row = el("div", "tl-row");
+    row.append(label, groupLane(group, dayStart, max));
+    return row;
+  };
+  const shown = new Set();
+  for (const persona of activity.personas) {
+    const bandRow = el("div", "tl-row tl-row-band");
+    const label = el("div", "tl-label tl-label-static");
+    label.append(el("span", "tl-name", persona.name), el("span", "tl-sub", "她的一天"));
+    bandRow.append(label, statusBand(persona, dayStart, now));
+    rows.push(bandRow);
+    for (const group of activity.groups) {
+      if (overviewGroups.get(group.id)?.preset !== persona.preset) continue;
+      shown.add(group.id);
+      rows.push(laneRow(group));
+    }
+  }
+  for (const group of activity.groups) {
+    if (!shown.has(group.id)) rows.push(laneRow(group));
+  }
+
+  const axisRow = el("div", "tl-row tl-row-axis");
+  const axis = el("div", "tl-axis");
+  for (const hour of [0, 6, 12, 18, 24]) {
+    const tick = el("span", "", String(hour).padStart(2, "0"));
+    tick.style.left = `${(hour / 24) * 100}%`;
+    axis.append(tick);
+  }
+  axisRow.append(el("span"), axis);
+  rows.push(axisRow);
+
+  // Every lane shares one track width, so one line marks now across all of them.
+  if (now < dayStart + DAY_MS) {
+    const nowLine = el("div", "tl-now");
+    nowLine.style.setProperty("--pos", String((now - dayStart) / DAY_MS));
+    nowLine.append(el("span", "", "现在"));
+    rows.push(nowLine);
+  }
+  container.replaceChildren(...rows);
+}
+
+function moodMeter(label, value, signed) {
+  const item = el("span", "ac-vad");
+  item.append(el("span", "ac-vad-label", label));
+  const track = el("span", `ac-vad-track${signed ? " signed" : ""}`);
+  const fill = el("span");
+  if (signed) {
+    fill.style.left = value >= 0 ? "50%" : `${50 + value * 50}%`;
+    fill.style.width = `${Math.abs(value) * 50}%`;
+  } else {
+    fill.style.left = "0";
+    fill.style.width = `${value * 100}%`;
+  }
+  track.append(fill);
+  item.append(track, el("span", "mono", value.toFixed(2)));
+  return item;
+}
+
+function groupCard(group, today, tokens, now) {
+  const quiet = !group.last_message_ms || now - group.last_message_ms > QUIET_AFTER_MS;
+  const card = el("button", `panel ac-card${quiet ? " quiet" : ""}`);
+  card.type = "button";
+  card.addEventListener("click", () => showAcGroup(group.id));
+
+  const head = el("div", "ac-card-head");
+  head.append(el("span", "ac-card-name", today?.name || group.id));
+  if (today?.name) head.append(el("span", "mono ac-dim", group.id));
+  if (!group.worker_alive) head.append(el("span", "tag failure", "worker 停了"));
+  if (group.muted_until_ms) head.append(el("span", "tag warning", `禁言到 ${hhmm(group.muted_until_ms)}`));
+  if (!group.name) head.append(el("span", "tag warning", "没设人设"));
+
+  const vad = el("div", "ac-vads");
+  vad.append(
+    moodMeter("愉悦", group.emotion.valence, true),
+    moodMeter("兴奋", group.emotion.arousal, false),
+    moodMeter("强势", group.emotion.dominance, true),
+  );
+  const facts = el("ul", "ac-card-facts");
+  const add = text => facts.append(el("li", "", text));
+  add(`未读 ${group.unread}`);
+  add(group.last_look_ms ? `看群 ${relativeTime(group.last_look_ms)}` : "这次启动还没看过群");
+  if (today) add(`今天 ${today.messages} 条，她 ${today.speaks.length} 次`);
+  add(tokens ? `24h Token ${formatTokens(tokens.total)}，${tokens.requests} 次` : "24h Token 0");
+  if (group.last_message_ms) add(`最后一条 ${relativeTime(group.last_message_ms)}`);
+
+  card.append(head, el("p", "ac-mood", group.mood), vad, facts);
+  if (group.summary) card.append(el("p", "ac-summary", group.summary));
+  return card;
+}
+
+function renderAcGroups() {
+  const { status, activity } = state.autochat;
+  const container = $("#ac-groups");
+  const groups = status.overview?.groups || [];
+  const now = Date.now();
+  if (!acChanged("groups", [groups.map(({ queue, background_tasks, ...rest }) => rest), activity?.groups.map(g => [g.id, g.name, g.messages, g.speaks.length]), activity?.tokens, Math.floor(now / 60000)])) return;
+  const today = new Map((activity?.groups || []).map(group => [group.id, group]));
+  const tokens = new Map((activity?.tokens || []).map(item => [item.session_id, item]));
+  const sorted = [...groups].sort((a, b) => (b.last_message_ms || 0) - (a.last_message_ms || 0));
+  container.replaceChildren(...sorted.map(group => groupCard(group, today.get(group.id), tokens.get(group.id), now)));
+}
+
+function runFailures(detail) {
+  const failures = [...detail.errors];
+  for (const [id, group] of Object.entries(detail.groups)) {
+    if (group.profiles_failed) failures.push(`群 ${groupTitle(id)} 有 ${group.profiles_failed} 份档案整理失败`);
+    if (group.notes_failed) failures.push(`群 ${groupTitle(id)} 群志整理失败`);
+  }
+  for (const [preset, persona] of Object.entries(detail.personas)) {
+    if (persona.life_failed) failures.push(`${preset} 人生线整理失败`);
+    if (persona.diary_failed) failures.push(`${preset} 日记没写成`);
+    for (const id of persona.groups_blocked) failures.push(`群 ${groupTitle(id)} 群层整理失败，停在半路`);
+  }
+  if (detail.memories?.pending) failures.push(`还有 ${detail.memories.pending} 条记忆没算出向量`);
+  return failures;
+}
+
+function runSummary(detail) {
+  const groups = Object.values(detail.groups);
+  const personas = Object.values(detail.personas);
+  return [
+    `档案 ${groups.reduce((sum, group) => sum + group.profiles, 0)} 人`,
+    `群志 ${groups.filter(group => group.notes).length} 个`,
+    `群层 ${personas.reduce((sum, persona) => sum + persona.groups_updated.length, 0)} 个`,
+    detail.memories ? `删过期 ${detail.memories.deleted} 条` : "",
+  ].filter(Boolean).join("，");
+}
+
+function renderAcMaintenance() {
+  const { runs } = state.autochat;
+  const now = gmt8Parts();
+  const ranToday = runs.some(run => isoDay(run.started_at_ms) === `${now.year}-${now.month}-${now.day}`);
+  const note = $("#ac-maintenance-note");
+  note.hidden = ranToday || Number(now.hour) < MAINTENANCE_LATE_HOUR;
+  note.textContent = "今天还没有整理记录，03:30 那次可能没跑。";
+  $("#ac-maintenance-empty").hidden = runs.length > 0;
+  if (!acChanged("runs", runs)) return;
+  $("#ac-maintenance").replaceChildren(...runs.map(run => {
+    const button = el("button", `row ac-run${run.status === "partial" ? " warning" : ""}`);
+    button.type = "button";
+    button.addEventListener("click", () => showAcRun(run));
+    const failures = runFailures(run.detail);
+    button.append(
+      el("span", "mono", `${monthDay(run.started_at_ms)} ${hhmm(run.started_at_ms)}`),
+      el("span", `tag ${run.status === "ok" ? "success" : "warning"}`, run.status === "ok" ? "正常" : "部分失败"),
+      el("span", "ac-dim", formatSpan(run.finished_at_ms - run.started_at_ms)),
+      el("span", "ac-run-text", failures[0] || runSummary(run.detail)),
+    );
+    const item = el("li");
+    item.append(button);
+    return item;
+  }));
+}
+
+function selfLife(persona) {
+  const block = el("div", "ac-self-block");
+  block.append(el("p", "ac-prose", persona.life.text || "还没整理过。"));
+  const pending = persona.life.pending_facts;
+  block.append(el("p", "ac-note", [
+    persona.life.last_digest ? `整理到 ${persona.life.last_digest}` : "",
+    `待整理的自我陈述 ${pending.length} 条`,
+  ].filter(Boolean).join("，")));
+  if (pending.length) {
+    const list = el("ul", "ac-list");
+    for (const fact of pending) list.append(el("li", "", fact));
+    block.append(list);
+  }
+  return block;
+}
+
+function selfDiary(persona) {
+  const block = el("div", "ac-self-block");
+  if (!persona.diary.length) block.append(el("p", "ac-note", "还没有日记。"));
+  for (const entry of [...persona.diary].reverse()) {
+    const item = el("div", "ac-diary");
+    item.append(el("span", "mono ac-dim", entry.day.slice(5)), el("p", "ac-prose", entry.text));
+    block.append(item);
+  }
+  return block;
+}
+
+function selfSleep(persona) {
+  const block = el("div", "ac-self-block");
+  if (!persona.nights.length) block.append(el("p", "ac-note", "还没有记录。"));
+  const list = el("ul", "ac-list");
+  for (const night of [...persona.nights].reverse()) {
+    const row = el("li");
+    row.append(
+      el("span", "mono", monthDay(night.sleep_ms)),
+      el("span", "mono", `${hhmm(night.sleep_ms)}–${night.wake_ms ? hhmm(night.wake_ms) : "还没醒"}`),
+    );
+    if (night.wake_ms) row.append(el("span", "ac-dim", formatSpan(night.wake_ms - night.sleep_ms)));
+    list.append(row);
+  }
+  block.append(list);
+  return block;
+}
+
+function selfSegments(persona, dayStart) {
+  const block = el("div", "ac-self-block");
+  const list = el("ul", "ac-list");
+  for (const segment of persona.timeline) {
+    if (segment.end_ms && segment.end_ms < dayStart) continue;
+    const mode = segmentMode(segment);
+    const row = el("li");
+    row.append(
+      el("span", "mono", `${hhmm(segment.start_ms)}–${segment.end_ms ? hhmm(segment.end_ms) : ""}`),
+      el("span", `ac-mode mode-${mode}`, MODE_LABELS[mode]),
+      el("span", "", segment.doing),
+      el("span", "ac-dim", SOURCE_LABELS[segment.source] || segment.source),
+    );
+    list.append(row);
+  }
+  block.append(list);
+  return block;
+}
+
+function renderAcSelf() {
+  const { activity } = state.autochat;
+  if (!acChanged("self", [activity?.personas, state.acTab])) return;
+  const container = $("#ac-self");
+  if (!activity) {
+    container.replaceChildren(el("p", "ac-note", "还没有拿到过 autochat 的状态。"));
+    return;
+  }
+  const many = activity.personas.length > 1;
+  container.replaceChildren(...activity.personas.flatMap(persona => {
+    const render = {
+      life: () => selfLife(persona),
+      diary: () => selfDiary(persona),
+      sleep: () => selfSleep(persona),
+      segments: () => selfSegments(persona, activity.day_start_ms),
+    }[state.acTab];
+    return many ? [el("h3", "ac-section-title", persona.name), render()] : [render()];
+  }));
+}
+
+function renderAcNow() {
+  const personas = (state.autochat.status.overview?.personas || []).filter(persona => persona.mode);
+  if (!acChanged("now", personas)) return;
+  $("#ac-now").replaceChildren(...personas.map(persona => {
+    const mode = persona.sleep ? "sleep" : persona.mode;
+    const line = el("p");
+    line.append(
+      el("span", "ac-now-name", persona.name),
+      el("span", `ac-mode mode-${mode}`, MODE_LABELS[mode]),
+      el("span", "", `${persona.doing}，到 ${hhmm(persona.until_ms)}`),
+    );
+    if (persona.calls) line.append(el("span", "ac-dim", `放下手机后被叫了 ${persona.calls} 次`));
+    const night = persona.last_night;
+    if (night) {
+      line.append(el("span", "ac-dim", night.wake_ms ? `昨晚 ${hhmm(night.sleep_ms)}–${hhmm(night.wake_ms)}` : `${hhmm(night.sleep_ms)} 睡的`));
+    }
+    return line;
+  }));
+}
+
+function renderAutochat() {
+  const { status } = state.autochat;
+  const banner = $("#ac-offline");
+  banner.hidden = status.reachable;
+  if (!status.reachable) {
+    banner.textContent = `连不上 autochat：${status.reason}。`
+      + (status.last_ok_ms ? `最后成功在 ${formatTime(status.last_ok_ms, false)}，当前状态是那时的快照；` : "")
+      + "LLM 曲线、决策和整理记录来自共享库，照常可看。";
+  }
+  $("#view-autochat").classList.toggle("stale", !status.reachable);
+  renderAcProcess();
+  renderAcNow();
+  renderAcLlm();
+  renderAcToday();
+  renderAcGroups();
+  renderAcMaintenance();
+  renderAcSelf();
+}
+
+/* Dialogs share the existing detail dialog; loading never blocks opening. */
+
+function acSection(title, ...children) {
+  const section = el("section", "ac-section");
+  section.append(el("h3", "ac-section-title", title), ...children);
+  return section;
+}
+
+function openAcDialog(title, tagClass, tagText, nodes) {
+  $("#detail-title").textContent = title;
+  const tag = $("#detail-tag");
+  tag.className = `tag ${tagClass}`;
+  tag.textContent = tagText;
+  $("#detail-exchange").replaceChildren();
+  $("#detail-meta").replaceChildren();
+  $("#raw-section").hidden = true;
+  $("#detail-custom").replaceChildren(...nodes);
+  if (!$("#detail-dialog").open) $("#detail-dialog").showModal();
+}
+
+function lookOutcome(look) {
+  if (look.speak) return ["开口", "success"];
+  if (look.muted) return ["禁言中", "warning"];
+  if (look.willing === null) return ["Feedback 失败", "failure"];
+  if (look.willing < look.threshold) return ["不想说", ""];
+  return ["自己说得多了", ""];
+}
+
+function lookRow(look) {
+  const row = el("li", "ac-look");
+  const [outcome, tagClass] = lookOutcome(look);
+  row.append(
+    el("span", "mono", formatTime(look.created_at_ms, false)),
+    el("span", "", TRIGGER_LABELS[look.trigger] || look.trigger),
+    el("span", "mono ac-dim", `未读 ${look.unread}`),
+    el("span", "mono ac-dim", `${look.willing === null ? "—" : look.willing.toFixed(2)}/${look.threshold.toFixed(2)}`),
+    el("span", `tag ${tagClass || "plain"}`, outcome),
+  );
+  const extras = [
+    look.focus,
+    look.react && `贴了 ${look.react}`,
+    look.poke && `戳了 ${look.poke}`,
+    `自己占比 ${Math.round(look.self_share * 100)}%`,
+  ].filter(Boolean).join("；");
+  row.append(el("p", "ac-look-extra", extras));
+  return row;
+}
+
+async function appendLooks(groupId, list, more, before) {
+  const params = before ? `?before=${before}` : "";
+  const page = await (await api(`/api/autochat/groups/${groupId}/looks${params}`)).json();
+  list.append(...page.items.map(lookRow));
+  if (!page.items.length && !before) list.append(el("li", "ac-note", "还没有记录。"));
+  more.hidden = !page.next_before;
+  more.onclick = () => appendLooks(groupId, list, more, page.next_before).catch(error => toast(error.message));
+}
+
+function tokensTable(data) {
+  if (!data.models.length) return el("p", "ac-note", "这段时间没有用量。");
+  const table = el("table", "ac-table");
+  const head = el("tr");
+  for (const label of ["模型", "输入", "输出", "思考", "次数", "合计"]) head.append(el("th", label === "模型" ? "" : "num", label));
+  table.append(head);
+  for (const model of data.models) {
+    const row = el("tr");
+    row.append(
+      el("td", "", model.model),
+      el("td", "num mono", formatTokens(model.prompt)),
+      el("td", "num mono", formatTokens(model.completion)),
+      el("td", "num mono", formatTokens(model.reasoning)),
+      el("td", "num mono", String(model.requests)),
+      el("td", "num mono", formatTokens(model.prompt + model.completion)),
+    );
+    table.append(row);
+  }
+  return table;
+}
+
+function tokensSection(groupId) {
+  const range = el("div", "range");
+  const body = el("div", "", "正在加载…");
+  const load = async hours => {
+    $$("button", range).forEach(button => button.classList.toggle("active", Number(button.dataset.hours) === hours));
+    try {
+      const data = await (await api(`/api/autochat/groups/${groupId}/tokens?hours=${hours}`)).json();
+      body.replaceChildren(tokensTable(data));
+    } catch (error) {
+      body.replaceChildren(el("p", "ac-note", `进程离线：${error.message}`));
+    }
+  };
+  for (const [hours, label] of [[24, "24 小时"], [168, "7 天"], [720, "30 天"]]) {
+    const button = el("button", "", label);
+    button.type = "button";
+    button.dataset.hours = hours;
+    button.addEventListener("click", () => load(hours));
+    range.append(button);
+  }
+  load(24);
+  return acSection("Token 用量", range, body);
+}
+
+function textBlock(text, empty) {
+  return el("p", text ? "ac-prose" : "ac-note", text || empty);
+}
+
+async function showAcGroup(groupId) {
+  const list = el("ul", "ac-looks");
+  const more = el("button", "more-button", "加载更早的决策");
+  more.type = "button";
+  more.hidden = true;
+  const summary = acSection("话题摘要", el("p", "ac-note", "正在加载…"));
+  const live = el("div", "ac-detail");
+  openAcDialog(groupTitle(groupId), "", "", [
+    summary,
+    tokensSection(groupId),
+    acSection("最近的决策（意愿/门槛）", list, more),
+    live,
+  ]);
+  appendLooks(groupId, list, more, 0).catch(error => toast(error.message));
+  try {
+    const detail = await (await api(`/api/autochat/groups/${groupId}`)).json();
+    const messages = el("ul", "ac-messages");
+    for (const message of detail.messages) {
+      const row = el("li", message.self ? "self" : "");
+      row.append(el("span", "mono ac-dim", hhmm(message.time_ms)), el("span", "ac-speaker", message.user_name), el("span", "", message.content));
+      messages.append(row);
+    }
+    const threads = el("ul", "ac-list");
+    for (const thread of detail.threads) {
+      const row = el("li");
+      row.append(
+        el("span", "tag plain", thread.kind),
+        el("span", "", `${thread.who ? `${thread.who}：` : ""}${thread.content}`),
+        el("span", "ac-dim", `${thread.ask_from_ms > Date.now() ? `${monthDay(thread.ask_from_ms)} 起提，` : ""}${monthDay(thread.forget_at_ms)} 忘`),
+      );
+      threads.append(row);
+    }
+    const affinity = el("ul", "ac-list");
+    for (const person of detail.affinity) {
+      const row = el("li");
+      row.append(
+        el("span", "mono", String(person.affinity)),
+        el("span", "", person.name),
+        el("span", "ac-dim", `互动 ${person.interactions} 次${person.last_ms ? `，最近 ${relativeTime(person.last_ms)}` : ""}`),
+      );
+      affinity.append(row);
+    }
+    summary.replaceWith(acSection("话题摘要", textBlock(detail.summary, "还没有摘要。")));
+    live.replaceChildren(
+      acSection("最近的消息", detail.messages.length ? messages : textBlock("", "还没有消息。")),
+      acSection("悬着的事", detail.threads.length ? threads : textBlock("", "没有。")),
+      acSection("好感前 5", detail.affinity.length ? affinity : textBlock("", "还没有。")),
+      acSection(`群里的她${detail.digested_until ? `（整理到 ${detail.digested_until}）` : ""}`, textBlock(detail.persona_group, "还没整理过。")),
+      acSection("观察日记", textBlock(detail.journal.slice().reverse().join("\n"), "还没有。")),
+      acSection(`群志${detail.notes_until_ms ? `（整理到 ${monthDay(detail.notes_until_ms)}）` : ""}`, textBlock(detail.notes, "还没有。")),
+      el("p", "ac-note", detail.episodes_until_ms ? `分段整理读到 ${formatTime(detail.episodes_until_ms, false)}` : "分段整理还没开始"),
+    );
+  } catch (error) {
+    summary.replaceWith(el("p", "ac-note", `进程离线，摘要、消息和群里的她要等它恢复才能看：${error.message}`));
+  }
+}
+
+async function showAcRun(run) {
+  const detail = run.detail;
+  const day = isoDay(run.started_at_ms - DAY_MS);
+  const failures = runFailures(detail);
+  const meta = el("dl", "meta");
+  for (const [label, value] of [
+    ["时间", `${formatTime(run.started_at_ms)} 至 ${timeOfDay(run.finished_at_ms)}（GMT+8）`],
+    ["耗时", formatSpan(run.finished_at_ms - run.started_at_ms)],
+    ["过期清理", detail.memories ? `删 ${detail.memories.deleted} 条，补算向量 ${detail.memories.filled} 条，还差 ${detail.memories.pending} 条` : "没跑完"],
+    ["悬着的事", detail.threads_forgotten === null ? "没跑完" : `忘掉 ${detail.threads_forgotten} 件`],
+  ]) meta.append(el("dt", "", label), el("dd", "", value));
+
+  const groups = el("table", "ac-table");
+  const head = el("tr");
+  for (const label of ["群", "档案", "群志", "群层"]) head.append(el("th", "", label));
+  groups.append(head);
+  const updated = new Set(Object.values(detail.personas).flatMap(persona => persona.groups_updated));
+  const blocked = new Set(Object.values(detail.personas).flatMap(persona => persona.groups_blocked));
+  for (const [id, group] of Object.entries(detail.groups)) {
+    const row = el("tr");
+    row.append(
+      el("td", "", groupTitle(id)),
+      el("td", group.profiles_failed ? "ac-warn" : "", `${group.profiles} 人${group.profiles_failed ? `，失败 ${group.profiles_failed}` : ""}`),
+      el("td", group.notes_failed ? "ac-warn" : "", group.notes_failed ? "失败" : group.notes ? "已更新" : "不到期"),
+      el("td", blocked.has(id) ? "ac-warn" : "", blocked.has(id) ? "失败" : updated.has(id) ? "已更新" : "没变"),
+    );
+    groups.append(row);
+  }
+  const nodes = [meta];
+  if (failures.length) {
+    nodes.push(el("pre", "error-text", failures.join("\n")));
+  }
+  nodes.push(acSection("各群", groups));
+  for (const [preset, persona] of Object.entries(detail.personas)) {
+    nodes.push(el("p", "ac-note", `${preset}：人生线整理到 ${persona.life_until || "还没整理过"}${persona.life_failed ? "，这次失败" : ""}${persona.diary_failed ? "，日记没写成" : ""}`));
+  }
+  const content = el("div", "ac-detail", "正在加载改动和日记…");
+  nodes.push(content);
+  openAcDialog(`${monthDay(run.started_at_ms)} 的整理`, run.status === "ok" ? "success" : "warning", run.status === "ok" ? "正常" : "部分失败", nodes);
+
+  try {
+    const digest = await (await api(`/api/autochat/digest?day=${day}`)).json();
+    const changes = el("ul", "ac-list ac-list-stack");
+    // The model writes "无" when a rewrite changed nothing worth noting.
+    for (const item of digest.life) {
+      if (item.changes !== "无") changes.append(el("li", "", `人生线：${item.changes}`));
+    }
+    for (const item of digest.groups) {
+      if (item.changes !== "无") changes.append(el("li", "", `${groupTitle(item.session_id)}：${item.changes}`));
+    }
+    const journals = el("ul", "ac-list ac-list-stack");
+    for (const item of digest.journals) journals.append(el("li", "", `${groupTitle(item.session_id)}：${item.text}`));
+    content.replaceChildren(
+      acSection(`${day} 的改动`, changes.children.length ? changes : textBlock("", "没有改动。")),
+      acSection(`${day} 的日记`, textBlock(digest.diary.map(item => item.text).join("\n"), "这天没有日记，或者已经过了保留期。")),
+      acSection(`${day} 的观察日记`, journals.children.length ? journals : textBlock("", "这天没有，或者已经过了保留期。")),
+    );
+  } catch (error) {
+    content.replaceChildren(el("p", "ac-note", `进程离线，改动说明和日记要等它恢复才能看：${error.message}`));
+  }
+}
+
+async function loadAutochatStatus() {
+  const status = await (await api("/api/autochat")).json();
+  state.autochat.status = status;
+  $("#nav-autochat").className = `status-dot ${status.reachable ? "ok" : "bad"}`;
+}
+
+async function loadAutochat() {
+  await loadAutochatStatus();
+  const { status } = state.autochat;
+  const [activity, history, runs] = await Promise.all([
+    status.activity_ms && status.activity_ms !== state.autochat.activityMs
+      ? api("/api/autochat/activity").then(response => response.json())
+      : state.autochat.activity,
+    api("/api/autochat/history").then(response => response.json()),
+    api("/api/autochat/maintenance").then(response => response.json()),
+  ]);
+  state.autochat.activity = activity;
+  state.autochat.activityMs = status.activity_ms || 0;
+  state.autochat.history = history;
+  state.autochat.runs = runs;
+  renderAutochat();
+}
+
 /* Views, refresh, theme */
 
 function activeView() {
@@ -848,12 +1652,15 @@ function showView(view) {
     else item.removeAttribute("aria-current");
   });
   $$(".view").forEach(section => section.classList.toggle("active", section.id === `view-${view}`));
+  // The 24-hour pulse is HakuBot only; autochat has its own timeline.
+  $(".pulse").hidden = view === "autochat";
 }
 
 function loadView(view) {
   if (view === "events") return loadEvents();
   if (view === "diagnostics") return loadDiagnostics();
   if (view === "storage") return loadStorage();
+  if (view === "autochat") return loadAutochat();
   return loadSystemHistory();
 }
 
@@ -871,7 +1678,15 @@ async function refreshVisibleView() {
   if (document.hidden || state.refreshInFlight) return;
   state.refreshInFlight = true;
   try {
-    await Promise.all([loadBotStatus(), loadOverview(), loadSystemStatus(), loadView(activeView())]);
+    const view = activeView();
+    await Promise.all([
+      loadBotStatus(),
+      loadOverview(),
+      loadSystemStatus(),
+      // The sidebar dot needs this on every view; the autochat view loads it itself.
+      view === "autochat" ? null : loadAutochatStatus(),
+      loadView(view),
+    ]);
     state.refreshErrorShown = false;
     setLive(true);
   } catch (error) {
@@ -962,6 +1777,13 @@ function bindEvents() {
       .catch(() => toast("复制失败，浏览器没有授予剪贴板权限"));
   });
 
+  $$("#ac-tabs button").forEach(button => button.addEventListener("click", () => {
+    $$("#ac-tabs button").forEach(item => item.classList.toggle("active", item === button));
+    state.acTab = button.dataset.tab;
+    renderAcSelf();
+  }));
+  $("#ac-errors").addEventListener("click", showLlmErrors);
+
   $("#theme-toggle").addEventListener("click", toggleTheme);
   matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
     if (!localStorage.getItem("webconsole_theme")) applyTheme(systemTheme());
@@ -976,7 +1798,7 @@ async function initialize() {
   setInterval(updateClock, 1000);
   updateCleanupCutoff();
   try {
-    await Promise.all([loadFilters(), loadBotStatus(), loadOverview(), loadSystemStatus(), loadEvents()]);
+    await Promise.all([loadFilters(), loadBotStatus(), loadOverview(), loadSystemStatus(), loadAutochatStatus(), loadEvents()]);
   } catch (error) {
     toast(`加载失败：${error.message}`);
   }

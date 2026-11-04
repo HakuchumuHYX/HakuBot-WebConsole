@@ -55,18 +55,33 @@ type Stats struct {
 	ResponseLatestMS     *int64 `json:"response_latest_ms,omitempty"`
 	DiagnosticEarliestMS *int64 `json:"diagnostic_earliest_ms,omitempty"`
 	DiagnosticLatestMS   *int64 `json:"diagnostic_latest_ms,omitempty"`
+	LLMCallCount         int64  `json:"llm_call_count"`
+	LLMCallEarliestMS    *int64 `json:"llm_call_earliest_ms,omitempty"`
+	LLMCallLatestMS      *int64 `json:"llm_call_latest_ms,omitempty"`
+	LookCount            int64  `json:"look_count"`
+	LookEarliestMS       *int64 `json:"look_earliest_ms,omitempty"`
+	LookLatestMS         *int64 `json:"look_latest_ms,omitempty"`
 	RetentionDays        int    `json:"retention_days"`
 }
 
 type Preview struct {
 	ResponseCount   int64 `json:"response_count"`
 	DiagnosticCount int64 `json:"diagnostic_count"`
+	AutochatCount   int64 `json:"autochat_count"`
 }
 
 type CleanupResult struct {
 	Cutoff             time.Time `json:"-"`
 	ResponsesDeleted   int64     `json:"responses_deleted"`
 	DiagnosticsDeleted int64     `json:"diagnostics_deleted"`
+	AutochatDeleted    int64     `json:"autochat_deleted"`
+}
+
+// autochatTables lists the history autochat writes, for preview and cleanup.
+var autochatTables = []struct{ name, timestampColumn string }{
+	{"autochat_llm_calls", "created_at_ms"},
+	{"autochat_looks", "created_at_ms"},
+	{"autochat_maintenance_runs", "started_at_ms"},
 }
 
 func (m *Manager) Stats(ctx context.Context) (Stats, error) {
@@ -84,6 +99,16 @@ func (m *Manager) Stats(ctx context.Context) (Stats, error) {
 	}
 	result.DiagnosticCount, result.DiagnosticEarliestMS, result.DiagnosticLatestMS, err =
 		m.tableRange(ctx, "diagnostic_logs", "created_at_ms")
+	if err != nil {
+		return Stats{}, err
+	}
+	result.LLMCallCount, result.LLMCallEarliestMS, result.LLMCallLatestMS, err =
+		m.tableRange(ctx, "autochat_llm_calls", "created_at_ms")
+	if err != nil {
+		return Stats{}, err
+	}
+	result.LookCount, result.LookEarliestMS, result.LookLatestMS, err =
+		m.tableRange(ctx, "autochat_looks", "created_at_ms")
 	if err != nil {
 		return Stats{}, err
 	}
@@ -134,6 +159,21 @@ func (m *Manager) Preview(
 	).Scan(&preview.DiagnosticCount); err != nil {
 		return Preview{}, err
 	}
+	for _, table := range autochatTables {
+		var count int64
+		if err := m.db.QueryRowContext(
+			ctx,
+			fmt.Sprintf(
+				"SELECT COUNT(*) FROM %s WHERE %s < ?",
+				table.name,
+				table.timestampColumn,
+			),
+			cutoffMS,
+		).Scan(&count); err != nil {
+			return Preview{}, err
+		}
+		preview.AutochatCount += count
+	}
 	return preview, nil
 }
 
@@ -167,6 +207,19 @@ func (m *Manager) Cleanup(
 	if err != nil {
 		return CleanupResult{}, err
 	}
+	var autochat int64
+	for _, table := range autochatTables {
+		deleted, err := m.deleteBatches(
+			ctx,
+			table.name,
+			table.timestampColumn,
+			cutoffMS,
+		)
+		if err != nil {
+			return CleanupResult{}, err
+		}
+		autochat += deleted
+	}
 	if err := m.reclaim(ctx); err != nil {
 		return CleanupResult{}, err
 	}
@@ -174,6 +227,7 @@ func (m *Manager) Cleanup(
 		Cutoff:             cutoff,
 		ResponsesDeleted:   responses,
 		DiagnosticsDeleted: diagnostics,
+		AutochatDeleted:    autochat,
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"hakubot-webconsole/internal/autochat"
 	"hakubot-webconsole/internal/config"
 	"hakubot-webconsole/internal/database"
 	"hakubot-webconsole/internal/query"
@@ -46,11 +47,13 @@ func run() error {
 
 	storageManager := storage.NewManager(db, cfg.DatabasePath, cfg.RetentionDays)
 	sysCollector := sysmonitor.NewCollector(db, cfg.DatabasePath)
+	autochatClient := autochat.NewClient(cfg.AutochatURL, cfg.AutochatToken)
 
 	handler := server.New(
 		query.NewRepository(db),
 		storageManager,
 		sysCollector,
+		autochatClient,
 		cfg.PublicOrigin,
 		http.FileServer(http.FS(webassets.Files)),
 	)
@@ -70,6 +73,7 @@ func run() error {
 	defer listener.Close()
 
 	go sysCollector.Start(ctx)
+	go autochatClient.Start(ctx)
 	if cfg.RetentionDays > 0 {
 		go runAutomaticRetention(ctx, storageManager)
 	}
@@ -127,6 +131,8 @@ func runAutomaticRetention(
 			result.ResponsesDeleted,
 			"diagnostics_deleted",
 			result.DiagnosticsDeleted,
+			"autochat_deleted",
+			result.AutochatDeleted,
 		)
 	}
 }
