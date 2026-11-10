@@ -848,7 +848,7 @@ function renderChart(selector, { points, fromMs, toMs, series, yMax, thresholds,
 
 const DAY_MS = 86400000;
 const MODE_LABELS = { free: "有空", busy: "在忙", away: "放下手机", sleep: "睡觉" };
-const SOURCE_LABELS = { due: "到点定的", said: "她在群里说的", called: "被叫到", start: "启动时定的", calm: "/calm" };
+const SOURCE_LABELS = { due: "到点定的", chat: "聊天时定的", called: "被叫到", start: "启动时定的" };
 const LLM_LABELS = {
   chat: "Chat", feedback: "Feedback", background: "Background",
   embedding: "Embedding", rerank: "Rerank", web_search: "联网搜索",
